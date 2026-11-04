@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+package open_reality;
+
+// Message types matching Virtual Desktop's protocol
+enum MessageType {
+    PEER_INFO = 0;
+    CRASH_CALLSTACK = 1;
+    UPDATE_REQUIRED = 2;
+    UPDATE_UNAVAILABLE = 3;
+    UPDATE_IN_PROGRESS = 4;
+    USER_SETTINGS_RELOAD = 5;
+    USER_SETTINGS_PROPERTY_CHANGED = 6;
+    MOBILE_SETTINGS_RELOAD = 7;
+    MOBILE_SETTINGS_PROPERTY_CHANGED = 8;
+    STREAMER_SETTINGS_RELOAD = 9;
+    STREAMER_SETTINGS_PROPERTY_CHANGED = 10;
+    BOUNDARY_DATA_CHANGED = 11;
+    SKELETON_DATA_CHANGED = 12;
+    RESTART_STREAM = 13;
+    FORCE_KEY_FRAME = 14;
+    SWITCH_MONITOR = 15;
+    TOGGLE_DICTATION = 16;
+    LAUNCH_STEAM_VR = 17;
+    EXIT_STEAM_VR = 18;
+    RECENTER = 19;
+    REQUEST_GAMES = 20;
+    GAMES = 21;
+    REQUEST_GAME_THUMBNAILS = 22;
+    GAME_THUMBNAIL = 23;
+    LAUNCH_GAME = 24;
+    EXIT_GAME = 25;
+    GAME_EXITED = 26;
+    SHOW_DESKTOP = 27;
+    DISPOSE_GAMEPAD_EMULATION = 28;
+    ADD_MONITOR = 29;
+    REMOVE_MONITOR = 30;
+    SET_MONITOR_PORTRAIT = 31;
+    SCREENSHOT_TO_DESKTOP = 32;
+    EXIT = 33;
+    TOGGLE_VR_PASSTHROUGH = 34;
+    TOGGLE_PERFORMANCE_OVERLAY = 35;
+    TOGGLE_FOVEATED_STREAMING = 36;
+    DISCONNECT = 37;
+    REQUEST_CURSOR = 38;
+    CURSOR = 39;
+    CLIPBOARD_CHANGED = 40;
+    CLIPBOARD_TEXT = 41;
+    CLIPBOARD_IMAGE = 42;
+}
+
+// The peer information exchanged on connect
+message PeerInfo {
+    string computer_id = 1;
+    string computer_name = 2;
+    string os = 3;
+    string streamer_version = 4;
+    repeated string private_addresses = 5;
+    bool allow_remote_connections = 6;
+    bool encrypt_local_traffic = 7;
+    bool encrypt_remote_traffic = 8;
+}
+
+// Wrapper for all net messages
+message NetMessage {
+    MessageType message_type = 1;
+    bytes payload = 2;
+    uint64 timestamp = 3;
+    uint32 sequence = 4;
+}
+
+// Settings synced from the headset
+message MobileSettings {
+    uint32 hmd_type = 1;
+    uint32 resolution_width = 2;
+    uint32 resolution_height = 3;
+    bool is_portrait = 4;
+    float ipd = 5;
+    float fov_left_up = 6;
+    float fov_left_down = 7;
+    float fov_left_left = 8;
+    float fov_left_right = 9;
+    float fov_right_up = 10;
+    float fov_right_down = 11;
+    float fov_right_left = 12;
+    float fov_right_right = 13;
+    uint32 measured_bandwidth_mbps = 14;
+    bool use_spacewarp = 15;
+    uint32 desktop_framerate = 16;
+    uint32 desktop_bitrate_kbps = 17;
+    uint32 vr_bitrate_kbps = 18;
+    uint32 vr_framerate = 19;
+    bool foveated_streaming = 20;
+    uint32 refresh_rate = 21;
+}
+
+// Streamer state shared with headset
+message StreamerState {
+    bool has_vr = 1;
+    uint32 streaming_source = 2; // Desktop=0, VR=1, Video=2
+    uint32 active_codec = 3;
+    bool auto_adjust_bitrate = 4;
+    bool can_switch_monitor = 5;
+    bool can_launch_steam_vr = 6;
+    string adapter_name = 7;
+    bool adapter_is_amd = 8;
+}
+
+// Input from headset to PC
+message InputEvent {
+    oneof input {
+        KeyboardInput keyboard = 1;
+        MouseInput mouse = 2;
+        ControllerInput controller = 3;
+        HandTrackingInput hand_tracking = 4;
+    }
+}
+
+message KeyboardInput {
+    uint32 virtual_key = 1;
+    uint32 scan_code = 2;
+    bool key_up = 3;
+}
+
+message MouseInput {
+    float x = 1;
+    float y = 2;
+    int32 scroll_delta = 3;
+    uint32 button_flags = 4;
+    bool absolute = 5;
+}
+
+message ControllerInput {
+    uint32 button_flags = 1;
+    uint32 touch_flags = 2;
+    float left_trigger = 3;
+    float right_trigger = 4;
+    float left_thumb_x = 5;
+    float left_thumb_y = 6;
+    float right_thumb_x = 7;
+    float right_thumb_y = 8;
+}
+
+message HandTrackingInput {
+    repeated float left_joint_positions = 1;  // 26 joints * 3 (x, y, z)
+    repeated float right_joint_positions = 2;
+    repeated float left_joint_rotations = 3;  // 26 joints * 4 (quaternion)
+    repeated float right_joint_rotations = 4;
+}
+
+// Monitor information
+message MonitorInfo {
+    uint32 id = 1;
+    string name = 2;
+    string device_name = 3;
+    int32 x = 4;
+    int32 y = 5;
+    uint32 width = 6;
+    uint32 height = 7;
+    uint32 display_frequency = 8;
+    float dpi_scale = 9;
+    bool is_primary = 10;
+    bool is_portrait = 11;
+    bool is_virtual = 12;
+}
+
+// Video frame metadata
+message FrameHeader {
+    uint64 frame_number = 1;
+    uint64 capture_timestamp_us = 2;
+    uint32 width = 3;
+    uint32 height = 4;
+    uint32 codec = 5;
+    bool is_keyframe = 6;
+    uint32 payload_size = 7;
+    uint32 monitor_id = 8;
+}

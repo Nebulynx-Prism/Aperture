@@ -1,0 +1,3 @@
+[target.x86_64-pc-windows-gnu]
+linker = "c:\\Users\\Phoenix\\Documents\\OpenReality\\w64devkit\\bin\\gcc.exe"
+ar = "c:\\Users\\Phoenix\\Documents\\OpenReality\\w64devkit\\bin\\ar.exe"
