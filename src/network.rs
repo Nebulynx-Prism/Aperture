@@ -365,13 +365,65 @@ pub struct StreamServer {
 }
 
 impl StreamServer {
-    /// Bind the TCP control listener on `bind_addr`.
+    /// Bind the TCP control listener on `bind_addr` with SO_REUSEADDR and retry logic.
     pub async fn new(bind_addr: SocketAddr) -> Result<Self> {
-        let tcp_listener = TcpListener::bind(bind_addr)
-            .await
-            .context("failed to bind TCP listener")?;
+        let domain = match bind_addr {
+            SocketAddr::V4(_) => socket2::Domain::IPV4,
+            SocketAddr::V6(_) => socket2::Domain::IPV6,
+        };
+
+        let mut bound_listener = None;
+        for attempt in 1..=5 {
+            let socket = match socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP)) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Failed to create socket on attempt {attempt}: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    continue;
+                }
+            };
+
+            let _ = socket.set_reuse_address(true);
+            let _ = socket.set_nonblocking(true);
+
+            match socket.bind(&bind_addr.into()) {
+                Ok(()) => {
+                    if let Err(e) = socket.listen(128) {
+                        warn!("Socket listen failed on attempt {attempt}: {e}");
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        continue;
+                    }
+                    let std_listener: std::net::TcpListener = socket.into();
+                    match TcpListener::from_std(std_listener) {
+                        Ok(l) => {
+                            bound_listener = Some(l);
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("TcpListener::from_std failed on attempt {attempt}: {e}");
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("TCP bind attempt {attempt}/5 on {bind_addr} failed ({e}), retrying in 300ms...");
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+            }
+        }
+
+        let tcp_listener = match bound_listener {
+            Some(l) => l,
+            None => {
+                // Final direct attempt fallback
+                TcpListener::bind(bind_addr)
+                    .await
+                    .context("Failed to bind TCP listener after retries")?
+            }
+        };
+
         let local_addr = tcp_listener.local_addr()?;
-        info!("StreamServer listening on {local_addr}");
+        info!("StreamServer successfully bound and listening on {local_addr}");
 
         Ok(Self {
             tcp_listener,
@@ -416,7 +468,7 @@ impl StreamServer {
         debug!("Peer UDP endpoint: {peer_udp_addr}");
 
         // Connect the UDP socket to the peer so send/recv work without addressing.
-        udp_socket.connect(peer_udp_addr).await?;
+        let _ = udp_socket.connect(peer_udp_addr).await;
 
         Ok(PeerConnection::new(tcp, udp_socket, peer_addr))
     }
@@ -476,27 +528,34 @@ impl StreamServer {
 /// A bidirectional connection to a single peer (headset).
 ///
 /// Control messages travel over TCP with length-prefix framing.
-/// Video and audio frames travel over UDP for lower latency.
+/// Video and audio frames travel over UDP (for Wi-Fi) or TCP (for USB wired)
+/// with independent reading and writing halves to prevent deadlock.
 pub struct PeerConnection {
-    tcp: Arc<Mutex<TcpStream>>,
+    tcp_reader: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
+    tcp_writer: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
     udp: Arc<UdpSocket>,
     peer_addr: SocketAddr,
     state: Arc<RwLock<ConnectionState>>,
     sequence: AtomicU32,
     rtt_us: AtomicU64,
     connected_at: Instant,
+    is_loopback: bool,
 }
 
 impl PeerConnection {
     fn new(tcp: TcpStream, udp: UdpSocket, peer_addr: SocketAddr) -> Self {
+        let is_loopback = peer_addr.ip().is_loopback();
+        let (tcp_reader, tcp_writer) = tcp.into_split();
         Self {
-            tcp: Arc::new(Mutex::new(tcp)),
+            tcp_reader: Arc::new(Mutex::new(tcp_reader)),
+            tcp_writer: Arc::new(Mutex::new(tcp_writer)),
             udp: Arc::new(udp),
             peer_addr,
             state: Arc::new(RwLock::new(ConnectionState::Connected)),
             sequence: AtomicU32::new(0),
             rtt_us: AtomicU64::new(0),
             connected_at: Instant::now(),
+            is_loopback,
         }
     }
 
@@ -509,10 +568,10 @@ impl PeerConnection {
         let data = msg.serialize();
         let len = (data.len() as u32).to_be_bytes();
 
-        let mut tcp = self.tcp.lock().await;
-        tcp.write_all(&len).await?;
-        tcp.write_all(&data).await?;
-        tcp.flush().await?;
+        let mut writer = self.tcp_writer.lock().await;
+        writer.write_all(&len).await?;
+        writer.write_all(&data).await?;
+        writer.flush().await?;
 
         debug!(
             "Sent message type={} seq={} ({} bytes) to {}",
@@ -526,11 +585,11 @@ impl PeerConnection {
 
     /// Receive the next `NetMessage` from the TCP control channel.
     pub async fn recv_message(&self) -> Result<NetMessage> {
-        let mut tcp = self.tcp.lock().await;
+        let mut reader = self.tcp_reader.lock().await;
 
         // Read length prefix.
         let mut len_buf = [0u8; FRAME_LEN_SIZE];
-        tcp.read_exact(&mut len_buf).await.context("TCP read length")?;
+        reader.read_exact(&mut len_buf).await.context("TCP read length")?;
         let len = u32::from_be_bytes(len_buf) as usize;
 
         if len > 16 * 1024 * 1024 {
@@ -539,7 +598,7 @@ impl PeerConnection {
 
         // Read payload.
         let mut buf = vec![0u8; len];
-        tcp.read_exact(&mut buf).await.context("TCP read payload")?;
+        reader.read_exact(&mut buf).await.context("TCP read payload")?;
 
         let msg = NetMessage::deserialize(&buf)?;
         debug!(
@@ -549,14 +608,20 @@ impl PeerConnection {
         Ok(msg)
     }
 
-    // -- UDP fast-path --------------------------------------------------------
+    // -- Video & Audio Fast-Path ----------------------------------------------
 
-    /// Send an encoded video frame over the UDP fast-path.
-    ///
-    /// Large frames are fragmented into `MAX_UDP_PAYLOAD`-sized chunks.
-    /// Each datagram starts with `UDP_MAGIC | channel | fragment_index | total_fragments | sequence`.
+    /// Send an encoded video frame.
+    /// Over USB Wired (loopback via adb reverse), sends the complete frame over TCP
+    /// because ADB reverse does not support UDP port forwarding.
+    /// Over Wi-Fi, sends fragmented datagrams over UDP fast-path.
     pub async fn send_video_frame(&self, data: &[u8]) -> Result<()> {
-        self.send_udp_data(CHANNEL_VIDEO, data).await
+        if self.is_loopback {
+            let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+            let msg = NetMessage::new(101, data.to_vec(), seq);
+            self.send_message(msg).await
+        } else {
+            self.send_udp_data(CHANNEL_VIDEO, data).await
+        }
     }
 
     /// Send encoded audio samples over the UDP fast-path.

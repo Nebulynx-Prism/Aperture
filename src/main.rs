@@ -10,6 +10,7 @@ mod network;
 mod input;
 mod settings;
 mod service_client;
+mod driver_bridge;
 mod session;
 mod ui;
 

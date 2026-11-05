@@ -48,8 +48,8 @@ Unicode True
 ; Version Information
 VIProductVersion "0.1.0.0"
 VIAddVersionKey "ProductName" "Prism Aperture Server"
-VIAddVersionKey "CompanyName" "NebulynxGames"
-VIAddVersionKey "LegalCopyright" "MIT License"
+VIAddVersionKey "CompanyName" "Nebulynx Game Studios"
+VIAddVersionKey "LegalCopyright" "Nebulynx Game Studios"
 VIAddVersionKey "FileDescription" "Prism Aperture Server & Service Installer"
 VIAddVersionKey "FileVersion" "0.1.0.0"
 VIAddVersionKey "ProductVersion" "0.1.0.0"
@@ -89,12 +89,29 @@ Section "Prism Aperture Core" SecCore
 
     SetOutPath "$INSTDIR"
 
+    ; Install OpenVR Driver bundle
+    SetOutPath "$INSTDIR\openvr_driver"
+    File /r "target\release\openvr_driver\*.*"
+
+    ; Register OpenVR Driver with SteamVR
+    DetailPrint "Registering OpenVR Driver with SteamVR..."
+    ExecWait '"$PROGRAMFILES64\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe" adddriver "$INSTDIR\openvr_driver"'
+    ExecWait '"$PROGRAMFILES\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe" adddriver "$INSTDIR\openvr_driver"'
+
+    SetOutPath "$INSTDIR"
+
     ; Install and start the Prism Aperture Service
     DetailPrint "Installing Prism Aperture Service..."
     ExecWait '"$INSTDIR\prism-aperture-service.exe" --install'
 
     DetailPrint "Starting Prism Aperture Service..."
     ExecWait '"$INSTDIR\prism-aperture-service.exe" --start'
+
+    ; Configure Windows Firewall rules
+    DetailPrint "Configuring Windows Firewall rules..."
+    ExecWait 'netsh advfirewall firewall add rule name="Prism Aperture Server" dir=in action=allow program="$INSTDIR\prism-aperture-server.exe" enable=yes'
+    ExecWait 'netsh advfirewall firewall add rule name="Prism Aperture Server TCP" dir=in action=allow protocol=TCP localport=38810,38811,5555 enable=yes'
+    ExecWait 'netsh advfirewall firewall add rule name="Prism Aperture Server UDP" dir=in action=allow protocol=UDP localport=38810,38811 enable=yes'
 
     ; Write installation path to registry
     WriteRegStr HKLM "Software\NebulynxGames\PrismSuite\Aperture" "InstallDir" "$INSTDIR"
@@ -107,7 +124,7 @@ Section "Prism Aperture Core" SecCore
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "DisplayName" "Prism Aperture Server"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "DisplayIcon" "$INSTDIR\assets\icon.ico"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "DisplayVersion" "0.1.0"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "Publisher" "NebulynxGames"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "Publisher" "Nebulynx Game Studios"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "UninstallString" '"$INSTDIR\Uninstall.exe"'
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "NoModify" 1
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "NoRepair" 1
@@ -134,6 +151,16 @@ Section "Uninstall"
     ExecWait 'taskkill /F /IM prism-aperture-server.exe'
     ExecWait '"$INSTDIR\prism-aperture-service.exe" --stop'
     ExecWait '"$INSTDIR\prism-aperture-service.exe" --uninstall'
+
+    ; Remove Windows Firewall rules
+    ExecWait 'netsh advfirewall firewall delete rule name="Prism Aperture Server"'
+    ExecWait 'netsh advfirewall firewall delete rule name="Prism Aperture Server TCP"'
+    ExecWait 'netsh advfirewall firewall delete rule name="Prism Aperture Server UDP"'
+
+    ; Unregister OpenVR Driver
+    ExecWait '"$PROGRAMFILES64\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe" removedriver "$INSTDIR\openvr_driver"'
+    ExecWait '"$PROGRAMFILES\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe" removedriver "$INSTDIR\openvr_driver"'
+    RMDir /r "$INSTDIR\openvr_driver"
 
     ; Delete files
     Delete "$INSTDIR\prism-aperture-server.exe"

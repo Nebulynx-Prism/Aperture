@@ -140,21 +140,72 @@ async fn run_session_orchestrator(
         warn!("mDNS broadcast warning: {e}");
     }
 
-    // Auto-setup USB wired forwarding via ADB (ALVR-style USB link)
+    // Auto-setup USB wired forwarding & wireless TCPIP via ADB (ALVR-style link)
     #[cfg(windows)]
     tokio::spawn(async {
+        // Configure TCPIP mode on Quest for wireless ADB
+        let _ = std::process::Command::new("adb")
+            .args(["tcpip", "5555"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .status();
+
+        // Configure reverse TCP tunnels for wired USB link
         let _ = std::process::Command::new("adb")
             .args(["reverse", "tcp:38810", "tcp:38810"])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .creation_flags(0x08000000)
             .status();
         let _ = std::process::Command::new("adb")
             .args(["reverse", "tcp:38811", "tcp:38811"])
             .creation_flags(0x08000000)
             .status();
-        info!("Configured USB wired reverse forwarding on ports 38810/38811");
+        info!("Configured ADB TCPIP mode (5555) and USB wired reverse forwarding on ports 38810/38811");
+
+        // Attempt Windows Firewall rules (if elevated)
+        let _ = std::process::Command::new("netsh")
+            .args(["advfirewall", "firewall", "add", "rule", "name=Prism Aperture Server TCP", "dir=in", "action=allow", "protocol=TCP", "localport=38810,38811,5555", "enable=yes"])
+            .creation_flags(0x08000000)
+            .status();
+        let _ = std::process::Command::new("netsh")
+            .args(["advfirewall", "firewall", "add", "rule", "name=Prism Aperture Server UDP", "dir=in", "action=allow", "protocol=UDP", "localport=38810,38811", "enable=yes"])
+            .creation_flags(0x08000000)
+            .status();
+
+        // Auto-register OpenVR driver with SteamVR
+        let vrpathreg_candidates = [
+            r"C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe",
+            r"C:\Program Files\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe",
+        ];
+        let driver_candidates = [
+            Some(std::path::PathBuf::from(r"C:\ALVR\installations\v21.0.0-dev14+nightly.2026.10.25")),
+            std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("openvr_driver"))),
+            Some(std::path::PathBuf::from(r"C:\Program Files\NebulynxGames\PrismSuite\Aperture\openvr_driver")),
+            Some(std::path::PathBuf::from(r"C:\Users\Phoenix\Documents\OpenReality\tools\openvr_driver")),
+        ];
+
+        for vrpathreg in vrpathreg_candidates {
+            if std::path::Path::new(vrpathreg).exists() {
+                for driver_opt in &driver_candidates {
+                    if let Some(drv) = driver_opt {
+                        if drv.join("driver.vrdrivermanifest").exists() {
+                            let _ = std::process::Command::new(vrpathreg)
+                                .args(["adddriver", &drv.to_string_lossy()])
+                                .creation_flags(0x08000000)
+                                .status();
+                            info!("Registered OpenVR driver at {}", drv.display());
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+        }
     });
 
     info!("Prism Aperture Server listening for Quest clients on port {DEFAULT_CONTROL_PORT}...");
+
+    // Ensure SteamVR virtual HMD is configured (avoiding Error 108: Headset Not Detected)
+    crate::driver_bridge::ensure_steamvr_configured(1832, 1920, 1536, 960);
+    let driver_bridge = Arc::new(crate::driver_bridge::DriverBridge::new());
 
     // 4. Client Accept Loop
     while !shutdown.load(Ordering::SeqCst) {
@@ -166,9 +217,10 @@ async fn run_session_orchestrator(
                 let telem = Arc::clone(&telemetry);
                 let sett = settings.clone();
                 let shut = Arc::clone(&shutdown);
+                let bridge = Arc::clone(&driver_bridge);
 
                 tokio::spawn(async move {
-                    handle_client_session(peer, sett, telem, shut).await;
+                    handle_client_session(peer, sett, telem, shut, bridge).await;
                 });
             }
             Err(e) => {
@@ -226,9 +278,13 @@ async fn handle_client_session(
     settings: StreamerSettings,
     telemetry: Arc<StreamTelemetry>,
     shutdown: Arc<AtomicBool>,
+    driver_bridge: Arc<crate::driver_bridge::DriverBridge>,
 ) {
     let peer_addr = peer.peer_addr();
     let peer = Arc::new(peer);
+
+    // Notify SteamVR OpenVR driver bridge of active connection
+    driver_bridge.set_connected(true);
 
     // Send initial PeerInfo
     let hostname = std::env::var("COMPUTERNAME")
@@ -277,6 +333,10 @@ async fn handle_client_session(
                         }
                     } else if net_msg.message_type == (MessageType::LaunchSteamVr as u32) {
                         info!("Received LaunchSteamVr from Quest client! Launching SteamVR runtime...");
+                        crate::driver_bridge::ensure_steamvr_configured(1832, 1920, 1536, 960);
+                        // Notify headset to drop into VR environment
+                        let vr_msg = NetMessage::new(MessageType::ShowDesktop as u32, vec![0], 0);
+                        let _ = peer_in.send_message(vr_msg).await;
                         #[cfg(windows)]
                         {
                             let _ = std::process::Command::new("cmd")
@@ -287,6 +347,10 @@ async fn handle_client_session(
                     } else if net_msg.message_type == (MessageType::LaunchGame as u32) {
                         let app_id = String::from_utf8_lossy(&net_msg.payload);
                         info!("Received LaunchGame request for app ID: {app_id}");
+                        crate::driver_bridge::ensure_steamvr_configured(1832, 1920, 1536, 960);
+                        // Notify headset to drop into VR environment
+                        let vr_msg = NetMessage::new(MessageType::ShowDesktop as u32, vec![0], 0);
+                        let _ = peer_in.send_message(vr_msg).await;
                         #[cfg(windows)]
                         {
                             let cmd_str = format!("steam://rungameid/{app_id}");
@@ -312,19 +376,79 @@ async fn handle_client_session(
     let shut_vid = Arc::clone(&shutdown);
     let telem_vid = Arc::clone(&telemetry);
     let sett_vid = settings.clone();
+    let bridge_vid = Arc::clone(&driver_bridge);
 
     let video_task = tokio::spawn(async move {
-        run_video_streaming_loop(peer_vid, sett_vid, telem_vid, shut_vid).await;
+        run_video_streaming_loop(peer_vid, sett_vid, telem_vid, shut_vid, bridge_vid).await;
+    });
+
+    // 3. Spawning VR App / Environment Watcher Loop
+    let peer_vr = Arc::clone(&peer);
+    let shut_vr = Arc::clone(&shutdown);
+    let vr_task = tokio::spawn(async move {
+        let mut last_vr_state = false;
+        while !shut_vr.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            let current_vr_state = is_vr_process_running();
+            if current_vr_state != last_vr_state {
+                last_vr_state = current_vr_state;
+                let payload = if current_vr_state { vec![0] } else { vec![1] };
+                info!("VR session state changed: active = {current_vr_state}. Notifying Quest client...");
+                let msg = NetMessage::new(MessageType::ShowDesktop as u32, payload, 0);
+                if let Err(_) = peer_vr.send_message(msg).await {
+                    break;
+                }
+            }
+        }
     });
 
     // Wait for session to terminate
     tokio::select! {
         _ = input_task => {},
         _ = video_task => {},
+        _ = vr_task => {},
     }
 
     info!("Session ended for client {peer_addr}");
+    driver_bridge.set_connected(false);
     telemetry.connected_clients.fetch_sub(1, Ordering::SeqCst);
+}
+
+#[cfg(windows)]
+fn is_vr_process_running() -> bool {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+
+    fn to_wide(s: &str) -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    unsafe {
+        let titles = [
+            "SteamVR Status",
+            "SteamVR",
+            "SteamVR Compositor",
+            "VRChat",
+            "Beat Saber",
+            "Blade & Sorcery",
+        ];
+        for title in &titles {
+            let w = to_wide(title);
+            if let Ok(hwnd) = FindWindowW(PCWSTR::null(), PCWSTR::from_raw(w.as_ptr())) {
+                if !hwnd.is_invalid() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+fn is_vr_process_running() -> bool {
+    false
 }
 
 /// Parse raw binary input packet and inject into Windows
@@ -358,6 +482,7 @@ async fn run_video_streaming_loop(
     settings: StreamerSettings,
     telemetry: Arc<StreamTelemetry>,
     shutdown: Arc<AtomicBool>,
+    driver_bridge: Arc<crate::driver_bridge::DriverBridge>,
 ) {
     let mut capture = match DesktopCapture::new(0) {
         Ok(c) => c,
@@ -367,9 +492,15 @@ async fn run_video_streaming_loop(
         }
     };
 
+    let cap_w = capture.width();
+    let cap_h = capture.height();
+    let width = if cap_w > 0 { cap_w } else { 1920 };
+    let height = if cap_h > 0 { cap_h } else { 1080 };
+    info!("Initializing video encoder matching display resolution: {}x{}", width, height);
+
     let encoder_config = EncoderConfig {
-        width: 1920,
-        height: 1080,
+        width,
+        height,
         framerate: settings.framerate,
         bitrate_kbps: settings.bitrate_limit_mbps * 1000,
         codec: match settings.preferred_codec {
@@ -405,19 +536,31 @@ async fn run_video_streaming_loop(
         }
         last_frame_time = now;
 
-        // Capture frame
-        if let Ok(Some(frame)) = capture.capture_frame(5) {
-            // Encode frame
-            if let Ok(packets) = encoder.encode_frame(&frame.data, frame.width, frame.height, frame.format) {
-                for pkt in packets {
-                    if !pkt.data.is_empty() {
-                        bytes_sent += pkt.data.len();
-                        frames_sent += 1;
+        // Capture desktop frame
+        match capture.capture_frame(5) {
+            Ok(Some(frame)) => {
+                match encoder.encode_frame(&frame.data, frame.width, frame.height, frame.format) {
+                    Ok(packets) => {
+                        for pkt in packets {
+                            if !pkt.data.is_empty() {
+                                bytes_sent += pkt.data.len();
+                                frames_sent += 1;
 
-                        // Send over UDP fast-path
-                        let _ = peer.send_video_frame(&pkt.data).await;
+                                if let Err(e) = peer.send_video_frame(&pkt.data).await {
+                                    warn!("send_video_frame error: {e}");
+                                }
+                                driver_bridge.update_frame(frames_sent);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("encode_frame error: {e}");
                     }
                 }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!("capture_frame error: {e}");
             }
         }
 
@@ -427,6 +570,8 @@ async fn run_video_streaming_loop(
             let fps = frames_sent as f32 / elapsed_sec;
             let mbps = (bytes_sent as f32 * 8.0) / (elapsed_sec * 1_000_000.0);
             let lat = peer.latency_ms() as f32;
+
+            info!("Streaming telemetry: {fps:.1} FPS, {mbps:.2} Mbps, {lat:.1} ms latency (sent {frames_sent} frames/sec)");
 
             *telemetry.current_fps.write().await = fps;
             *telemetry.current_bitrate_mbps.write().await = mbps;

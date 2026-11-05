@@ -12,10 +12,15 @@
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
+
+#[cfg(windows)]
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 
 use crate::capture::FrameFormat;
 
@@ -91,10 +96,9 @@ pub struct VideoEncoder {
     active_encoder_name: String,
     process: Option<Child>,
     stdin: Option<ChildStdin>,
-    stdout: Option<ChildStdout>,
+    stdout_rx: Option<Receiver<Vec<u8>>>,
     force_keyframe_flag: Arc<AtomicBool>,
     frame_index: i64,
-    read_buffer: Vec<u8>,
 }
 
 impl VideoEncoder {
@@ -116,10 +120,9 @@ impl VideoEncoder {
             active_encoder_name: selected_encoder,
             process: None,
             stdin: None,
-            stdout: None,
+            stdout_rx: None,
             force_keyframe_flag: Arc::new(AtomicBool::new(true)),
             frame_index: 0,
-            read_buffer: vec![0u8; 1024 * 1024 * 2], // 2MB output buffer
         };
 
         if let Some(binary_path) = encoder_binary {
@@ -140,34 +143,185 @@ impl VideoEncoder {
         };
 
         let mut cmd = Command::new(binary);
-        cmd.args([
-            "-hide_banner",
-            "-loglevel", "error",
-            "-f", "rawvideo",
-            "-pix_fmt", "bgra",
-            "-s", &format!("{}x{}", self.config.width, self.config.height),
-            "-r", &self.config.framerate.to_string(),
-            "-i", "-",
-            "-c:v", &self.active_encoder_name,
-            "-b:v", &format!("{}k", self.config.bitrate_kbps),
-            "-maxrate", &format!("{}k", self.config.bitrate_kbps),
-            "-bufsize", &format!("{}k", self.config.bitrate_kbps / 2),
-            "-g", &self.config.keyframe_interval.to_string(),
-            "-tune", "zerolatency",
-            "-f", format_arg,
-            "-",
+        let mut args = vec![
+            "-hide_banner".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-f".to_string(),
+            "rawvideo".to_string(),
+            "-pix_fmt".to_string(),
+            "bgra".to_string(),
+            "-s".to_string(),
+            format!("{}x{}", self.config.width, self.config.height),
+            "-r".to_string(),
+            self.config.framerate.to_string(),
+            "-i".to_string(),
+            "-".to_string(),
+            "-pix_fmt".to_string(),
+            "nv12".to_string(),
+            "-c:v".to_string(),
+            self.active_encoder_name.clone(),
+            "-b:v".to_string(),
+            format!("{}k", self.config.bitrate_kbps),
+            "-maxrate".to_string(),
+            format!("{}k", self.config.bitrate_kbps),
+            "-bufsize".to_string(),
+            format!("{}k", self.config.bitrate_kbps / 2),
+            "-g".to_string(),
+            self.config.keyframe_interval.to_string(),
+            "-bf".to_string(),
+            "0".to_string(),
+        ];
+
+        if self.active_encoder_name.contains("qsv") {
+            args.extend([
+                "-preset".to_string(),
+                "veryfast".to_string(),
+                "-scenario".to_string(),
+                "displayremoting".to_string(),
+                "-forced_idr".to_string(),
+                "1".to_string(),
+                "-low_delay_brc".to_string(),
+                "1".to_string(),
+                "-async_depth".to_string(),
+                "1".to_string(),
+                "-gpb".to_string(),
+                "0".to_string(),
+                "-aud".to_string(),
+                "1".to_string(),
+            ]);
+            if self.config.codec == VideoCodec::Hevc {
+                args.extend(["-profile:v".to_string(), "main".to_string()]);
+            } else if self.config.codec == VideoCodec::H264 {
+                args.extend(["-profile:v".to_string(), "high".to_string()]);
+            }
+        } else if self.active_encoder_name.contains("nvenc") {
+            args.extend([
+                "-tune".to_string(),
+                "ull".to_string(),
+                "-zerolatency".to_string(),
+                "1".to_string(),
+                "-aud".to_string(),
+                "1".to_string(),
+            ]);
+            if self.config.codec == VideoCodec::Hevc {
+                args.extend(["-profile:v".to_string(), "main".to_string()]);
+            } else if self.config.codec == VideoCodec::H264 {
+                args.extend(["-profile:v".to_string(), "high".to_string()]);
+            }
+        } else if self.active_encoder_name.contains("amf") {
+            args.extend([
+                "-usage".to_string(),
+                "ultralowlatency".to_string(),
+                "-aud".to_string(),
+                "1".to_string(),
+            ]);
+            if self.config.codec == VideoCodec::Hevc {
+                args.extend(["-profile:v".to_string(), "main".to_string()]);
+            }
+        } else if self.active_encoder_name.contains("mf") {
+            args.extend([
+                "-scenario".to_string(),
+                "display_remoting".to_string(),
+                "-rate_control".to_string(),
+                "ld_vbr".to_string(),
+            ]);
+        } else if self.active_encoder_name.contains("x264") || self.active_encoder_name.contains("x265") {
+            args.extend([
+                "-tune".to_string(),
+                "zerolatency".to_string(),
+                "-aud".to_string(),
+                "1".to_string(),
+            ]);
+            if self.config.codec == VideoCodec::Hevc {
+                args.extend(["-profile:v".to_string(), "main".to_string()]);
+            }
+        }
+
+        args.extend([
+            "-flush_packets".to_string(),
+            "1".to_string(),
+            "-f".to_string(),
+            format_arg.to_string(),
+            "-".to_string(),
         ]);
+
+        cmd.args(&args);
 
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::inherit());
 
         let mut child = cmd.spawn().context("Failed to spawn encoder subprocess")?;
         self.stdin = child.stdin.take();
-        self.stdout = child.stdout.take();
+        let mut stdout = child.stdout.take();
         self.process = Some(child);
 
-        info!("Encoder subprocess started successfully");
+        let codec = self.config.codec;
+
+        if let Some(mut out) = stdout {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("encoder-stdout-reader".to_string())
+                .spawn(move || {
+                    let mut read_buf = vec![0u8; 128 * 1024];
+                    let mut accum: Vec<u8> = Vec::with_capacity(512 * 1024);
+
+                    let aud_4: &[u8] = match codec {
+                        VideoCodec::Hevc => &[0x00, 0x00, 0x00, 0x01, 0x46],
+                        VideoCodec::H264 => &[0x00, 0x00, 0x00, 0x01, 0x09],
+                        VideoCodec::Av1 => &[0x00, 0x00, 0x00, 0x01],
+                    };
+                    let aud_3: &[u8] = match codec {
+                        VideoCodec::Hevc => &[0x00, 0x00, 0x01, 0x46],
+                        VideoCodec::H264 => &[0x00, 0x00, 0x01, 0x09],
+                        VideoCodec::Av1 => &[0x00, 0x00, 0x01],
+                    };
+
+                    while let Ok(n) = out.read(&mut read_buf) {
+                        if n == 0 {
+                            break;
+                        }
+                        accum.extend_from_slice(&read_buf[..n]);
+
+                        // Parse Access Units by splitting at the next AUD prefix
+                        loop {
+                            if accum.len() < 16 {
+                                break;
+                            }
+
+                            let next_pos = accum[4..]
+                                .windows(5)
+                                .position(|w| w == aud_4)
+                                .map(|p| p + 4)
+                                .or_else(|| {
+                                    accum[4..]
+                                        .windows(4)
+                                        .position(|w| w == aud_3)
+                                        .map(|p| p + 4)
+                                });
+
+                            if let Some(pos) = next_pos {
+                                let frame = accum[..pos].to_vec();
+                                accum.drain(..pos);
+                                if tx.send(frame).is_err() {
+                                    return;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+
+                    if !accum.is_empty() {
+                        let _ = tx.send(accum);
+                    }
+                })
+                .context("Failed to spawn encoder stdout thread")?;
+            self.stdout_rx = Some(rx);
+        }
+
+        info!("Encoder subprocess started successfully ({})", self.active_encoder_name);
         Ok(())
     }
 
@@ -190,21 +344,30 @@ impl VideoEncoder {
             }
             let _ = stdin.flush();
 
-            if let Some(stdout) = &mut self.stdout {
-                let mut chunk = vec![0u8; 65536];
-                // Non-blocking read or small buffer read
-                if let Ok(bytes_read) = stdout.read(&mut chunk) {
-                    if bytes_read > 0 {
-                        chunk.truncate(bytes_read);
-                        return Ok(vec![EncodedPacket {
-                            data: chunk,
-                            pts: self.frame_index,
-                            dts: self.frame_index,
-                            is_keyframe,
-                            codec: self.config.codec,
-                        }]);
-                    }
+            if let Some(rx) = &self.stdout_rx {
+                let mut packets = Vec::new();
+
+                if let Ok(frame) = rx.recv_timeout(Duration::from_millis(4)) {
+                    packets.push(EncodedPacket {
+                        data: frame,
+                        pts: self.frame_index,
+                        dts: self.frame_index,
+                        is_keyframe,
+                        codec: self.config.codec,
+                    });
                 }
+
+                while let Ok(frame) = rx.try_recv() {
+                    packets.push(EncodedPacket {
+                        data: frame,
+                        pts: self.frame_index,
+                        dts: self.frame_index,
+                        is_keyframe: false,
+                        codec: self.config.codec,
+                    });
+                }
+
+                return Ok(packets);
             }
         }
 
@@ -284,10 +447,10 @@ fn select_best_encoder(
         }
     }
 
-    // Software fallbacks
+    // Platform fallbacks (avoid libx264/libx265 which are missing in streaming ffmpeg builds)
     match codec {
-        VideoCodec::H264 => "libx264".to_string(),
-        VideoCodec::Hevc => "libx265".to_string(),
+        VideoCodec::H264 => "h264_mf".to_string(),
+        VideoCodec::Hevc => "hevc_mf".to_string(),
         VideoCodec::Av1 => "libsvtav1".to_string(),
     }
 }
@@ -296,33 +459,63 @@ fn select_best_encoder(
 pub fn detect_hardware_encoders() -> Vec<(VideoCodec, String)> {
     let mut detected = Vec::new();
 
-    // Probe NVIDIA NVENC DLLs
-    let has_nvenc = std::path::Path::new(r"C:\Windows\System32\nvEncodeAPI64.dll").exists();
-    if has_nvenc {
-        info!("Detected NVIDIA NVENC hardware encoder");
-        detected.push((VideoCodec::H264, "h264_nvenc".to_string()));
-        detected.push((VideoCodec::Hevc, "hevc_nvenc".to_string()));
-        detected.push((VideoCodec::Av1, "av1_nvenc".to_string()));
+    // 1. Probe DirectX DXGI adapters for Intel, NVIDIA, and AMD GPU Vendor IDs
+    #[cfg(windows)]
+    unsafe {
+        if let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() {
+            let mut adapter_idx = 0;
+            while let Ok(adapter) = factory.EnumAdapters1(adapter_idx) {
+                if let Ok(desc) = adapter.GetDesc1() {
+                    match desc.VendorId {
+                        0x8086 => {
+                            info!("Detected Intel GPU (VendorId 0x8086): enabling QuickSync (QSV)");
+                            detected.push((VideoCodec::H264, "h264_qsv".to_string()));
+                            detected.push((VideoCodec::Hevc, "hevc_qsv".to_string()));
+                            detected.push((VideoCodec::Av1, "av1_qsv".to_string()));
+                        }
+                        0x10DE => {
+                            info!("Detected NVIDIA GPU (VendorId 0x10DE): enabling NVENC");
+                            detected.push((VideoCodec::H264, "h264_nvenc".to_string()));
+                            detected.push((VideoCodec::Hevc, "hevc_nvenc".to_string()));
+                            detected.push((VideoCodec::Av1, "av1_nvenc".to_string()));
+                        }
+                        0x1002 => {
+                            info!("Detected AMD GPU (VendorId 0x1002): enabling AMF");
+                            detected.push((VideoCodec::H264, "h264_amf".to_string()));
+                            detected.push((VideoCodec::Hevc, "hevc_amf".to_string()));
+                            detected.push((VideoCodec::Av1, "av1_amf".to_string()));
+                        }
+                        _ => {}
+                    }
+                }
+                adapter_idx += 1;
+            }
+        }
     }
 
-    // Probe AMD AMF DLLs
-    let has_amf = std::path::Path::new(r"C:\Windows\System32\amfrt64.dll").exists();
-    if has_amf {
-        info!("Detected AMD AMF hardware encoder");
-        detected.push((VideoCodec::H264, "h264_amf".to_string()));
-        detected.push((VideoCodec::Hevc, "hevc_amf".to_string()));
-        detected.push((VideoCodec::Av1, "av1_amf".to_string()));
+    // 2. Probe NVIDIA NVENC DLL
+    if !detected.iter().any(|(_, n)| n.contains("nvenc")) {
+        if std::path::Path::new(r"C:\Windows\System32\nvEncodeAPI64.dll").exists() {
+            info!("Detected NVIDIA NVENC DLL");
+            detected.push((VideoCodec::H264, "h264_nvenc".to_string()));
+            detected.push((VideoCodec::Hevc, "hevc_nvenc".to_string()));
+            detected.push((VideoCodec::Av1, "av1_nvenc".to_string()));
+        }
     }
 
-    // Probe Intel QuickSync
-    let has_qsv = std::path::Path::new(r"C:\Windows\System32\mfx64.dll").exists()
-        || std::path::Path::new(r"C:\Windows\System32\igdgmm64.dll").exists();
-    if has_qsv {
-        info!("Detected Intel QuickSync hardware encoder");
-        detected.push((VideoCodec::H264, "h264_qsv".to_string()));
-        detected.push((VideoCodec::Hevc, "hevc_qsv".to_string()));
-        detected.push((VideoCodec::Av1, "av1_qsv".to_string()));
+    // 3. Probe AMD AMF DLL
+    if !detected.iter().any(|(_, n)| n.contains("amf")) {
+        if std::path::Path::new(r"C:\Windows\System32\amfrt64.dll").exists() {
+            info!("Detected AMD AMF DLL");
+            detected.push((VideoCodec::H264, "h264_amf".to_string()));
+            detected.push((VideoCodec::Hevc, "hevc_amf".to_string()));
+            detected.push((VideoCodec::Av1, "av1_amf".to_string()));
+        }
     }
+
+    // 4. Always add Windows MediaFoundation as robust system fallback
+    detected.push((VideoCodec::H264, "h264_mf".to_string()));
+    detected.push((VideoCodec::Hevc, "hevc_mf".to_string()));
 
     detected
 }
