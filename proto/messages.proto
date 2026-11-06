@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package open_reality;
 
-// Message types matching Virtual Desktop's protocol
+// Prism's control messages. This is not a verified Virtual Desktop wire protocol.
 enum MessageType {
     PEER_INFO = 0;
     CRASH_CALLSTACK = 1;
@@ -47,6 +47,11 @@ enum MessageType {
     CLIPBOARD_CHANGED = 40;
     CLIPBOARD_TEXT = 41;
     CLIPBOARD_IMAGE = 42;
+    INPUT_EVENT = 100;
+    VIDEO_FRAME = 101;
+    STREAM_CONFIG = 102; // payload: codec, width, height as big-endian uint32
+    STREAM_CONFIG_ACK = 103; // payload: single byte, 1 = accepted, 0 = rejected
+    STREAM_STATUS = 104; // payload: UTF-8 status text
 }
 
 // The peer information exchanged on connect

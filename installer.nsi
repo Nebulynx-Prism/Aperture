@@ -89,16 +89,7 @@ Section "Prism Aperture Core" SecCore
 
     SetOutPath "$INSTDIR"
 
-    ; Install OpenVR Driver bundle
-    SetOutPath "$INSTDIR\openvr_driver"
-    File /r "target\release\openvr_driver\*.*"
-
-    ; Register OpenVR Driver with SteamVR
-    DetailPrint "Registering OpenVR Driver with SteamVR..."
-    ExecWait '"$PROGRAMFILES64\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe" adddriver "$INSTDIR\openvr_driver"'
-    ExecWait '"$PROGRAMFILES\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe" adddriver "$INSTDIR\openvr_driver"'
-
-    SetOutPath "$INSTDIR"
+    ; No compatible Prism PCVR backend is shipped. Do not install/register the ALVR bundle.
 
     ; Install and start the Prism Aperture Service
     DetailPrint "Installing Prism Aperture Service..."
@@ -110,8 +101,8 @@ Section "Prism Aperture Core" SecCore
     ; Configure Windows Firewall rules
     DetailPrint "Configuring Windows Firewall rules..."
     ExecWait 'netsh advfirewall firewall add rule name="Prism Aperture Server" dir=in action=allow program="$INSTDIR\prism-aperture-server.exe" enable=yes'
-    ExecWait 'netsh advfirewall firewall add rule name="Prism Aperture Server TCP" dir=in action=allow protocol=TCP localport=38810,38811,5555 enable=yes'
-    ExecWait 'netsh advfirewall firewall add rule name="Prism Aperture Server UDP" dir=in action=allow protocol=UDP localport=38810,38811 enable=yes'
+    ExecWait 'netsh advfirewall firewall add rule name="Prism Aperture Server TCP" dir=in action=allow protocol=TCP localport=38810 enable=yes'
+    ExecWait 'netsh advfirewall firewall add rule name="Prism Aperture Server UDP" dir=in action=allow protocol=UDP localport=38810 enable=yes'
 
     ; Write installation path to registry
     WriteRegStr HKLM "Software\NebulynxGames\PrismSuite\Aperture" "InstallDir" "$INSTDIR"
@@ -157,10 +148,7 @@ Section "Uninstall"
     ExecWait 'netsh advfirewall firewall delete rule name="Prism Aperture Server TCP"'
     ExecWait 'netsh advfirewall firewall delete rule name="Prism Aperture Server UDP"'
 
-    ; Unregister OpenVR Driver
-    ExecWait '"$PROGRAMFILES64\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe" removedriver "$INSTDIR\openvr_driver"'
-    ExecWait '"$PROGRAMFILES\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe" removedriver "$INSTDIR\openvr_driver"'
-    RMDir /r "$INSTDIR\openvr_driver"
+    ; Legacy ALVR registration is not owned by this installer; leave it untouched.
 
     ; Delete files
     Delete "$INSTDIR\prism-aperture-server.exe"

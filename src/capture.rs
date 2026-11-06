@@ -13,9 +13,9 @@ use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_MAP_READ, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
@@ -24,9 +24,9 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
-    EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW, ReleaseDC, SelectObject,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HBITMAP, HDC,
-    HMONITOR, MONITORINFOEXW, SRCCOPY,
+    EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW, ReleaseDC, SelectObject, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, HMONITOR,
+    MONITORINFOEXW, SRCCOPY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
@@ -78,6 +78,7 @@ enum CaptureBackend {
         hdc_screen: HDC,
         hdc_mem: HDC,
         hbm: HBITMAP,
+        old_bitmap: HGDIOBJ,
         bmi: BITMAPINFO,
     },
 }
@@ -96,8 +97,16 @@ unsafe impl Sync for DesktopCapture {}
 
 impl Drop for DesktopCapture {
     fn drop(&mut self) {
-        if let CaptureBackend::Gdi { hdc_screen, hdc_mem, hbm, .. } = &self.backend {
+        if let CaptureBackend::Gdi {
+            hdc_screen,
+            hdc_mem,
+            hbm,
+            old_bitmap,
+            ..
+        } = &self.backend
+        {
             unsafe {
+                SelectObject(*hdc_mem, *old_bitmap);
                 let _ = DeleteObject(*hbm);
                 let _ = DeleteDC(*hdc_mem);
                 let _ = ReleaseDC(HWND::default(), *hdc_screen);
@@ -145,7 +154,7 @@ impl DesktopCapture {
 
             let hdc_mem = CreateCompatibleDC(hdc_screen);
             let hbm = CreateCompatibleBitmap(hdc_screen, width as i32, height as i32);
-            SelectObject(hdc_mem, hbm);
+            let old_bitmap = SelectObject(hdc_mem, hbm);
 
             let mut bmi = BITMAPINFO::default();
             bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -155,7 +164,10 @@ impl DesktopCapture {
             bmi.bmiHeader.biBitCount = 32;
             bmi.bmiHeader.biCompression = BI_RGB.0;
 
-            info!("Initialized Windows GDI desktop capture: {}x{}", width, height);
+            info!(
+                "Initialized Windows GDI desktop capture: {}x{}",
+                width, height
+            );
 
             Ok(Self {
                 monitor_id,
@@ -165,6 +177,7 @@ impl DesktopCapture {
                     hdc_screen,
                     hdc_mem,
                     hbm,
+                    old_bitmap,
                     bmi,
                 },
                 frame_counter: 0,
@@ -180,13 +193,17 @@ impl DesktopCapture {
             let output: IDXGIOutput = adapter.EnumOutputs(monitor_id)?;
             let output1: IDXGIOutput1 = output.cast()?;
 
-            let desc = output.GetDesc()?;
-            let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left).unsigned_abs();
-            let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).unsigned_abs();
-
-            info!("Duplicating monitor {}: {}x{}", monitor_id, width, height);
-
             let duplication = output1.DuplicateOutput(&device)?;
+            // DesktopCoordinates can be DPI-virtualized (1536x960 at 125% on a
+            // 1920x1200 display). CopyResource requires exact texture dimensions.
+            let duplicated_desc = duplication.GetDesc();
+            let width = duplicated_desc.ModeDesc.Width;
+            let height = duplicated_desc.ModeDesc.Height;
+            anyhow::ensure!(width > 0 && height > 0, "Invalid duplication dimensions");
+            info!(
+                "Duplicating monitor {} at physical texture size: {}x{}",
+                monitor_id, width, height
+            );
 
             // Create staging texture for CPU readback
             let staging_desc = D3D11_TEXTURE2D_DESC {
@@ -272,6 +289,7 @@ impl DesktopCapture {
                 hdc_screen,
                 hdc_mem,
                 hbm,
+                old_bitmap,
                 bmi,
             } => unsafe {
                 let width = self.width as usize;
@@ -279,7 +297,7 @@ impl DesktopCapture {
                 let tight_pitch = width * 4;
                 let mut buffer = vec![0u8; tight_pitch * height];
 
-                let _ = BitBlt(
+                BitBlt(
                     *hdc_mem,
                     0,
                     0,
@@ -289,10 +307,13 @@ impl DesktopCapture {
                     0,
                     0,
                     SRCCOPY | CAPTUREBLT,
-                );
+                )
+                .context("GDI desktop BitBlt failed")?;
 
+                // GetDIBits requires the bitmap to be deselected from any DC.
+                SelectObject(*hdc_mem, *old_bitmap);
                 let lines = GetDIBits(
-                    *hdc_mem,
+                    *hdc_screen,
                     *hbm,
                     0,
                     self.height,
@@ -300,10 +321,13 @@ impl DesktopCapture {
                     bmi as *mut _,
                     DIB_RGB_COLORS,
                 );
+                SelectObject(*hdc_mem, *hbm);
 
-                if lines == 0 {
-                    return Ok(None);
-                }
+                anyhow::ensure!(
+                    lines == self.height as i32,
+                    "GDI GetDIBits returned {lines} of {} rows",
+                    self.height
+                );
 
                 self.frame_counter += 1;
 
@@ -343,8 +367,8 @@ impl DesktopCapture {
                         if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
                             return Ok(None);
                         }
-                        warn!("AcquireNextFrame error ({e})");
-                        return Ok(None);
+                        return Err(e)
+                            .context("Desktop duplication lost; reconnect to recreate capture");
                     }
 
                     let resource = match resource {
@@ -356,6 +380,14 @@ impl DesktopCapture {
                     };
 
                     let texture: ID3D11Texture2D = resource.cast()?;
+                    let mut texture_desc = D3D11_TEXTURE2D_DESC::default();
+                    texture.GetDesc(&mut texture_desc);
+                    if texture_desc.Width != self.width || texture_desc.Height != self.height {
+                        dup.ReleaseFrame().ok();
+                        return Err(anyhow!(
+                            "Desktop texture dimensions changed; reconnect to recreate capture"
+                        ));
+                    }
                     context.CopyResource(&*staging, &texture);
                     dup.ReleaseFrame().ok();
 
@@ -411,11 +443,17 @@ impl DesktopCapture {
                 while let Ok(output) = adapter.EnumOutputs(output_idx) {
                     if let Ok(desc) = output.GetDesc() {
                         let name = String::from_utf16_lossy(
-                            &desc.DeviceName[..desc.DeviceName.iter().position(|&c| c == 0).unwrap_or(desc.DeviceName.len())],
+                            &desc.DeviceName[..desc
+                                .DeviceName
+                                .iter()
+                                .position(|&c| c == 0)
+                                .unwrap_or(desc.DeviceName.len())],
                         );
 
-                        let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left).unsigned_abs();
-                        let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).unsigned_abs();
+                        let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left)
+                            .unsigned_abs();
+                        let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top)
+                            .unsigned_abs();
 
                         monitors.push(MonitorInfo {
                             id: output_idx,
@@ -427,7 +465,8 @@ impl DesktopCapture {
                             height,
                             refresh_rate: 60, // Default fallback
                             dpi_scale: 1.0,
-                            is_primary: desc.DesktopCoordinates.left == 0 && desc.DesktopCoordinates.top == 0,
+                            is_primary: desc.DesktopCoordinates.left == 0
+                                && desc.DesktopCoordinates.top == 0,
                             is_portrait: height > width,
                         });
                     }

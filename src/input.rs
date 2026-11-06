@@ -14,6 +14,10 @@ use anyhow::{Context, Result};
 use std::mem;
 use tracing::{debug, error, info, trace, warn};
 use windows::Win32::Foundation::{BOOL, HANDLE, POINT, TRUE};
+use windows::Win32::Graphics::Gdi::{
+    CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, SelectObject, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
     KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
@@ -24,10 +28,6 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorInfo, GetIconInfo, GetSystemMetrics, CURSORINFO, CURSOR_SHOWING, ICONINFO,
     SM_CXSCREEN, SM_CYSCREEN,
-};
-use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, SelectObject, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
 };
 
 // ---------------------------------------------------------------------------
@@ -222,6 +222,10 @@ impl InputInjector {
 
     /// Inject a mouse button press or release.
     pub fn inject_mouse_button(&mut self, button: MouseButton, pressed: bool) -> Result<()> {
+        // Mouse packets carry current button state, not repeated down/up events.
+        if self.held_buttons.contains(&button) == pressed {
+            return Ok(());
+        }
         trace!(?button, pressed, "inject_mouse_button");
 
         let (flags, mouse_data) = match (button, pressed) {
@@ -231,9 +235,9 @@ impl InputInjector {
             (MouseButton::Right, false) => (MOUSEEVENTF_RIGHTUP, 0),
             (MouseButton::Middle, true) => (MOUSEEVENTF_MIDDLEDOWN, 0),
             (MouseButton::Middle, false) => (MOUSEEVENTF_MIDDLEUP, 0),
-            (MouseButton::X1, true) => (MOUSEEVENTF_XDOWN, 0x0001),  // XBUTTON1
+            (MouseButton::X1, true) => (MOUSEEVENTF_XDOWN, 0x0001), // XBUTTON1
             (MouseButton::X1, false) => (MOUSEEVENTF_XUP, 0x0001),
-            (MouseButton::X2, true) => (MOUSEEVENTF_XDOWN, 0x0002),  // XBUTTON2
+            (MouseButton::X2, true) => (MOUSEEVENTF_XDOWN, 0x0002), // XBUTTON2
             (MouseButton::X2, false) => (MOUSEEVENTF_XUP, 0x0002),
         };
 
@@ -458,7 +462,10 @@ impl GamepadEmulator {
     /// In a real implementation this would allocate a ViGEm target and plug it
     /// into the virtual bus.
     pub fn new(model: GamepadModel) -> Result<Self> {
-        info!(?model, "GamepadEmulator::new — STUB: virtual gamepad created");
+        info!(
+            ?model,
+            "GamepadEmulator::new — STUB: virtual gamepad created"
+        );
         Ok(Self {
             model,
             connected: true,
@@ -629,9 +636,7 @@ impl CursorCapture {
 
         // Query dimensions.
         // SAFETY: First call with null buffer to fill bmiHeader.
-        let scanlines = unsafe {
-            GetDIBits(hdc, hbm, 0, 0, None, &mut bmi, DIB_RGB_COLORS)
-        };
+        let scanlines = unsafe { GetDIBits(hdc, hbm, 0, 0, None, &mut bmi, DIB_RGB_COLORS) };
         if scanlines == 0 && bmi.bmiHeader.biWidth == 0 {
             // Clean up and return None.
             unsafe {

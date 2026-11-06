@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{A3A1A958-60D8-4E22-A7DC-3843CB367F62}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType Condition="'$(NativeKind)'==''">DynamicLibrary</ConfigurationType>
+    <ConfigurationType Condition="'$(NativeKind)'!=''">$(NativeKind)</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v145</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <NativeSource Condition="'$(NativeSource)'==''">$(MSBuildThisFileDirectory)driver.cpp</NativeSource>
+    <TargetName Condition="'$(TargetName)'==''">driver_prism_aperture</TargetName>
+    <OutDir Condition="'$(OutDir)'==''">$(MSBuildThisFileDirectory)driver\bin\win64\</OutDir>
+    <IntDir Condition="'$(IntDir)'==''">$(MSBuildThisFileDirectory)target\$(TargetName)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><WarningLevel>Level3</WarningLevel><Optimization>MaxSpeed</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>Sync</ExceptionHandling><DebugInformationFormat>ProgramDatabase</DebugInformationFormat></ClCompile>
+    <Link><AdditionalDependencies>d3d11.lib;dxgi.lib;ole32.lib;uuid.lib;%(AdditionalDependencies)</AdditionalDependencies><GenerateDebugInformation>true</GenerateDebugInformation><SubSystem>Console</SubSystem></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="$(NativeSource)" /></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, AeadCore, Nonce};
+use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
 use anyhow::{bail, Context, Result};
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -120,7 +120,7 @@ pub const DEFAULT_DATA_PORT: u16 = 38_811;
 pub const MDNS_SERVICE_TYPE: &str = "_prismaperture._tcp.local.";
 
 /// Maximum UDP datagram payload (fits in typical MTU minus headers).
-const MAX_UDP_PAYLOAD: usize = 65_000;
+const MAX_UDP_PAYLOAD: usize = 1_200;
 
 /// Length-prefix size for TCP framing (4 bytes, big-endian u32).
 const FRAME_LEN_SIZE: usize = 4;
@@ -290,9 +290,7 @@ impl CompressionLayer {
         }
         let orig_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
         if orig_size > max_size {
-            bail!(
-                "LZ4 uncompressed size ({orig_size}) exceeds limit ({max_size})"
-            );
+            bail!("LZ4 uncompressed size ({orig_size}) exceeds limit ({max_size})");
         }
         let decompressed = lz4_flex::decompress_size_prepended(data)
             .map_err(|e| anyhow::anyhow!("LZ4 decompress error: {e}"))?;
@@ -365,7 +363,7 @@ pub struct StreamServer {
 }
 
 impl StreamServer {
-    /// Bind the TCP control listener on `bind_addr` with SO_REUSEADDR and retry logic.
+    /// Bind the TCP control listener with retry logic and one owner per port.
     pub async fn new(bind_addr: SocketAddr) -> Result<Self> {
         let domain = match bind_addr {
             SocketAddr::V4(_) => socket2::Domain::IPV4,
@@ -374,7 +372,11 @@ impl StreamServer {
 
         let mut bound_listener = None;
         for attempt in 1..=5 {
-            let socket = match socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP)) {
+            let socket = match socket2::Socket::new(
+                domain,
+                socket2::Type::STREAM,
+                Some(socket2::Protocol::TCP),
+            ) {
                 Ok(s) => s,
                 Err(e) => {
                     warn!("Failed to create socket on attempt {attempt}: {e}");
@@ -383,7 +385,9 @@ impl StreamServer {
                 }
             };
 
-            let _ = socket.set_reuse_address(true);
+            // Windows SO_REUSEADDR permits two live streamers to bind one port,
+            // making incoming client routing ambiguous. Keep the default off.
+            socket.set_reuse_address(false)?;
             let _ = socket.set_nonblocking(true);
 
             match socket.bind(&bind_addr.into()) {
@@ -456,25 +460,34 @@ impl StreamServer {
 
         // Send the UDP port to the peer so it knows where to send datagrams.
         let mut tcp = tcp_stream;
+        tcp.set_nodelay(true)?;
+        // Limit queued SBS data so congestion applies backpressure quickly
+        // instead of letting stale video accumulate in the Windows send queue.
+        socket2::SockRef::from(&tcp).set_send_buffer_size(64 * 1024)?;
         let port_msg = udp_local.port().to_be_bytes();
         tcp.write_all(&port_msg).await?;
         tcp.flush().await?;
 
         // Read the peer's UDP port back.
         let mut peer_port_buf = [0u8; 2];
-        tcp.read_exact(&mut peer_port_buf).await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tcp.read_exact(&mut peer_port_buf),
+        )
+        .await
+        .context("UDP port handshake timed out")??;
         let peer_udp_port = u16::from_be_bytes(peer_port_buf);
         let peer_udp_addr = SocketAddr::new(peer_addr.ip(), peer_udp_port);
         debug!("Peer UDP endpoint: {peer_udp_addr}");
 
         // Connect the UDP socket to the peer so send/recv work without addressing.
-        let _ = udp_socket.connect(peer_udp_addr).await;
+        udp_socket.connect(peer_udp_addr).await?;
 
         Ok(PeerConnection::new(tcp, udp_socket, peer_addr))
     }
 
     /// Announce this streamer on the local network via mDNS.
-    pub async fn broadcast_discovery(&self) -> Result<()> {
+    pub async fn broadcast_discovery(&mut self) -> Result<()> {
         let daemon = mdns_sd::ServiceDaemon::new()
             .map_err(|e| anyhow::anyhow!("mDNS daemon init error: {e}"))?;
 
@@ -494,7 +507,8 @@ impl StreamServer {
             self.local_addr.port(),
             properties,
         )
-        .map_err(|e| anyhow::anyhow!("mDNS ServiceInfo error: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("mDNS ServiceInfo error: {e}"))?
+        .enable_addr_auto();
 
         daemon
             .register(service_info)
@@ -510,7 +524,7 @@ impl StreamServer {
         // NOTE: In a real deployment we would store this on `self` and
         // unregister on drop. For the initial implementation we intentionally
         // leak it so it stays active for the process lifetime.
-        std::mem::forget(daemon);
+        self.mdns_daemon = Some(daemon);
 
         Ok(())
     }
@@ -518,6 +532,16 @@ impl StreamServer {
     /// The local address the server is bound to.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+}
+
+impl Drop for StreamServer {
+    fn drop(&mut self) {
+        if let Some(daemon) = self.mdns_daemon.take() {
+            if let Ok(response) = daemon.shutdown() {
+                let _ = response.recv_timeout(std::time::Duration::from_millis(200));
+            }
+        }
     }
 }
 
@@ -537,6 +561,7 @@ pub struct PeerConnection {
     peer_addr: SocketAddr,
     state: Arc<RwLock<ConnectionState>>,
     sequence: AtomicU32,
+    audio_sequence: AtomicU32,
     rtt_us: AtomicU64,
     connected_at: Instant,
     is_loopback: bool,
@@ -553,6 +578,7 @@ impl PeerConnection {
             peer_addr,
             state: Arc::new(RwLock::new(ConnectionState::Connected)),
             sequence: AtomicU32::new(0),
+            audio_sequence: AtomicU32::new(0),
             rtt_us: AtomicU64::new(0),
             connected_at: Instant::now(),
             is_loopback,
@@ -569,9 +595,13 @@ impl PeerConnection {
         let len = (data.len() as u32).to_be_bytes();
 
         let mut writer = self.tcp_writer.lock().await;
-        writer.write_all(&len).await?;
-        writer.write_all(&data).await?;
-        writer.flush().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            writer.write_all(&len).await?;
+            writer.write_all(&data).await?;
+            writer.flush().await
+        })
+        .await
+        .context("TCP send stalled for five seconds")??;
 
         debug!(
             "Sent message type={} seq={} ({} bytes) to {}",
@@ -589,7 +619,10 @@ impl PeerConnection {
 
         // Read length prefix.
         let mut len_buf = [0u8; FRAME_LEN_SIZE];
-        reader.read_exact(&mut len_buf).await.context("TCP read length")?;
+        reader
+            .read_exact(&mut len_buf)
+            .await
+            .context("TCP read length")?;
         let len = u32::from_be_bytes(len_buf) as usize;
 
         if len > 16 * 1024 * 1024 {
@@ -598,7 +631,10 @@ impl PeerConnection {
 
         // Read payload.
         let mut buf = vec![0u8; len];
-        reader.read_exact(&mut buf).await.context("TCP read payload")?;
+        reader
+            .read_exact(&mut buf)
+            .await
+            .context("TCP read payload")?;
 
         let msg = NetMessage::deserialize(&buf)?;
         debug!(
@@ -615,7 +651,11 @@ impl PeerConnection {
     /// because ADB reverse does not support UDP port forwarding.
     /// Over Wi-Fi, sends fragmented datagrams over UDP fast-path.
     pub async fn send_video_frame(&self, data: &[u8]) -> Result<()> {
-        if self.is_loopback {
+        self.send_video_frame_reliable(data, false).await
+    }
+
+    pub async fn send_video_frame_reliable(&self, data: &[u8], reliable: bool) -> Result<()> {
+        if self.is_loopback || reliable {
             let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
             let msg = NetMessage::new(101, data.to_vec(), seq);
             self.send_message(msg).await
@@ -669,7 +709,11 @@ impl PeerConnection {
 
     /// Fragment `data` and send over UDP with a channel tag.
     async fn send_udp_data(&self, channel: u8, data: &[u8]) -> Result<()> {
-        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let seq = if channel == CHANNEL_AUDIO {
+            self.audio_sequence.fetch_add(1, Ordering::Relaxed)
+        } else {
+            self.sequence.fetch_add(1, Ordering::Relaxed)
+        };
 
         // Header per datagram: MAGIC(4) + channel(1) + frag_idx(2) + total_frags(2) + seq(4) = 13
         const HEADER_SIZE: usize = 13;
@@ -729,10 +773,13 @@ impl DiscoveryClient {
                 break;
             }
 
-            match tokio::time::timeout(remaining, tokio::task::spawn_blocking({
-                let rx = receiver.clone();
-                move || rx.recv_timeout(std::time::Duration::from_millis(500))
-            }))
+            match tokio::time::timeout(
+                remaining,
+                tokio::task::spawn_blocking({
+                    let rx = receiver.clone();
+                    move || rx.recv_timeout(std::time::Duration::from_millis(500))
+                }),
+            )
             .await
             {
                 Ok(Ok(Ok(event))) => {
@@ -976,5 +1023,71 @@ mod tests {
         client.send_message(msg).await.unwrap();
 
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_video_is_mtu_sized_and_audio_has_independent_sequence() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (_remote, _) = listener.accept().await.unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        udp.connect(receiver.local_addr().unwrap()).await.unwrap();
+        let peer = PeerConnection::new(tcp, udp, listener.local_addr().unwrap());
+        let frame: Vec<u8> = (0..5000).map(|i| (i % 251) as u8).collect();
+        peer.send_udp_data(CHANNEL_VIDEO, &frame).await.unwrap();
+        let mut assembled = Vec::new();
+        let mut datagram = [0u8; 1500];
+        for index in 0..5u16 {
+            let n = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                receiver.recv(&mut datagram),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(n <= 1200);
+            assert_eq!(&datagram[..4], &UDP_MAGIC);
+            assert_eq!(datagram[4], CHANNEL_VIDEO);
+            assert_eq!(
+                u16::from_be_bytes(datagram[5..7].try_into().unwrap()),
+                index
+            );
+            assert_eq!(u16::from_be_bytes(datagram[7..9].try_into().unwrap()), 5);
+            assert_eq!(u32::from_be_bytes(datagram[9..13].try_into().unwrap()), 0);
+            assembled.extend_from_slice(&datagram[13..n]);
+        }
+        assert_eq!(assembled, frame);
+        peer.send_audio_samples(&[1, 2]).await.unwrap();
+        receiver.recv(&mut datagram).await.unwrap();
+        peer.send_udp_data(CHANNEL_VIDEO, &[3]).await.unwrap();
+        receiver.recv(&mut datagram).await.unwrap();
+        assert_eq!(u32::from_be_bytes(datagram[9..13].try_into().unwrap()), 1);
+    }
+
+    #[tokio::test]
+    async fn usb_video_uses_framed_tcp_after_port_handshake() {
+        let mut server = StreamServer::new("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let address = server.local_addr();
+        let task = tokio::spawn(async move {
+            let peer = server.accept().await.unwrap();
+            peer.send_video_frame(&[0, 0, 1, 0x65, 42]).await.unwrap();
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let mut server_udp = [0; 2];
+        client.read_exact(&mut server_udp).await.unwrap();
+        assert_ne!(u16::from_be_bytes(server_udp), 0);
+        client.write_all(&12345u16.to_be_bytes()).await.unwrap();
+        let length = client.read_u32().await.unwrap() as usize;
+        let mut payload = vec![0; length];
+        client.read_exact(&mut payload).await.unwrap();
+        let message = NetMessage::deserialize(&payload).unwrap();
+        assert_eq!(message.message_type, 101);
+        assert_eq!(message.payload, [0, 0, 1, 0x65, 42]);
+        task.await.unwrap();
     }
 }

@@ -1,7 +1,7 @@
 //! OpenReality Service — Privileged background Windows Service.
 //!
-//! Replaces and improves upon the legacy Virtual Desktop Service (`VirtualDesktop.Service.exe`).
-//! Provides system-level management via a local Named Pipe (`\\.\pipe\OpenRealityService`):
+//! Provides Prism service commands; it does not implement a SteamVR HMD driver.
+//! Provides system-level management via a local Named Pipe (`\\.\pipe\PrismApertureService`):
 //! - Realtime & High process priority boosts for VR streaming
 //! - Process power throttling prevention (EcoQoS disabling)
 //! - OpenXR active runtime registration in HKLM
@@ -10,14 +10,14 @@
 //! - Service installation, uninstallation, and lifecycle management
 
 use anyhow::{Context, Result};
-use std::ffi::c_void;
+
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+
 use tracing::{error, info, warn};
 
 use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, GetLastError, BOOL, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, GetLastError};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS,
     REG_OPTION_NON_VOLATILE, REG_SZ,
@@ -32,7 +32,10 @@ use windows::Win32::System::Services::{
     SERVICE_WIN32_OWN_PROCESS,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, SetPriorityClass, HIGH_PRIORITY_CLASS, PROCESS_SET_INFORMATION,
+    OpenProcess, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
+    HIGH_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+    PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    PROCESS_SET_INFORMATION,
 };
 
 pub const SERVICE_NAME: &str = "PrismApertureService";
@@ -59,7 +62,8 @@ fn main() -> Result<()> {
         "--start" => start_service_cli(),
         "--stop" => stop_service_cli(),
         "--run" | "-r" => run_interactive(),
-        "--service" | _ => run_as_service(),
+        "--service" => run_as_service(),
+        other => anyhow::bail!("Unknown service argument: {other}"),
     }
 }
 
@@ -85,8 +89,7 @@ fn run_as_service() -> Result<()> {
     unsafe {
         let result = StartServiceCtrlDispatcherW(table.as_ptr());
         if result.is_err() {
-            warn!("Not running under SCM dispatcher, switching to interactive standalone mode");
-            return run_interactive();
+            return Err(result.unwrap_err().into());
         }
     }
 
@@ -95,13 +98,11 @@ fn run_as_service() -> Result<()> {
 
 unsafe extern "system" fn service_main(_argc: u32, _argv: *mut windows::core::PWSTR) {
     let name = HSTRING::from(SERVICE_NAME);
-    let status_handle = match RegisterServiceCtrlHandlerW(
-        PCWSTR(name.as_ptr()),
-        Some(service_ctrl_handler),
-    ) {
-        Ok(h) => h,
-        Err(_) => return,
-    };
+    let status_handle =
+        match RegisterServiceCtrlHandlerW(PCWSTR(name.as_ptr()), Some(service_ctrl_handler)) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
 
     SERVICE_STATUS_H = Some(status_handle);
 
@@ -137,7 +138,10 @@ unsafe extern "system" fn service_ctrl_handler(control: u32) {
     }
 }
 
-fn update_status(current_state: windows::Win32::System::Services::SERVICE_STATUS_CURRENT_STATE, wait_hint_ms: u32) {
+fn update_status(
+    current_state: windows::Win32::System::Services::SERVICE_STATUS_CURRENT_STATE,
+    wait_hint_ms: u32,
+) {
     unsafe {
         if let Some(handle) = SERVICE_STATUS_H {
             let mut status = SERVICE_STATUS {
@@ -187,28 +191,47 @@ fn run_tokio_server() {
 
         while IS_RUNNING.load(Ordering::SeqCst) {
             let server = match tokio::net::windows::named_pipe::ServerOptions::new()
-                .first_pipe_instance(true)
+                .reject_remote_clients(true)
                 .create(PIPE_NAME)
             {
                 Ok(s) => s,
                 Err(e) => {
+                    warn!("Could not create service pipe: {e}");
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     continue;
                 }
             };
 
-            if server.connect().await.is_ok() {
+            if matches!(
+                tokio::time::timeout(std::time::Duration::from_millis(500), server.connect()).await,
+                Ok(Ok(()))
+            ) {
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     let mut server = server;
-                    let mut buf = vec![0u8; 4096];
-                    if let Ok(n) = server.read(&mut buf).await {
-                        if n > 0 {
-                            let req_str = String::from_utf8_lossy(&buf[..n]);
-                            let response = process_command(&req_str);
-                            let _ = server.write_all(response.as_bytes()).await;
+                    // Newline framing, bounded memory and deadlines for partial clients.
+                    let transaction = async {
+                        let mut request = Vec::new();
+                        loop {
+                            let mut byte = [0u8; 1];
+                            if server.read(&mut byte).await? == 0 {
+                                return Ok::<(), std::io::Error>(());
+                            }
+                            if byte[0] == b'\n' {
+                                break;
+                            }
+                            if request.len() >= 4096 {
+                                return Ok(());
+                            }
+                            request.push(byte[0]);
                         }
-                    }
+                        let response = process_command(&String::from_utf8_lossy(&request));
+                        server.write_all(response.as_bytes()).await?;
+                        server.write_all(b"\n").await?;
+                        Ok(())
+                    };
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), transaction).await;
                 });
             }
         }
@@ -305,8 +328,24 @@ fn set_realtime_priority(pid: u32) -> Result<String> {
 }
 
 fn disable_process_throttling(pid: u32) -> Result<String> {
-    info!("Disabling power throttling for PID {pid}");
-    Ok(format!("PID {pid} power throttling disabled"))
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_SET_INFORMATION, false, pid)
+            .context("Failed to open process for power throttling control")?;
+        let result = SetProcessInformation(
+            handle,
+            ProcessPowerThrottling,
+            &state as *const _ as *const _,
+            std::mem::size_of_val(&state) as u32,
+        );
+        let _ = CloseHandle(handle);
+        result.context("Failed to disable process execution-speed throttling")?;
+    }
+    Ok(format!("Power throttling disabled for PID {pid}"))
 }
 
 fn set_openxr_runtime(manifest_path: &str) -> Result<String> {
@@ -331,7 +370,10 @@ fn set_openxr_runtime(manifest_path: &str) -> Result<String> {
             return Err(anyhow::anyhow!("Failed to open OpenXR registry key"));
         }
 
-        let val_data: Vec<u16> = manifest_path.encode_utf16().chain(std::iter::once(0)).collect();
+        let val_data: Vec<u16> = manifest_path
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
 
         let set_res = RegSetValueExW(
             hkey,
@@ -350,7 +392,9 @@ fn set_openxr_runtime(manifest_path: &str) -> Result<String> {
             info!("Registered active OpenXR runtime: {manifest_path}");
             Ok(format!("OpenXR runtime set to {manifest_path}"))
         } else {
-            Err(anyhow::anyhow!("Failed to write OpenXR ActiveRuntime value"))
+            Err(anyhow::anyhow!(
+                "Failed to write OpenXR ActiveRuntime value"
+            ))
         }
     }
 }
@@ -404,7 +448,10 @@ fn disable_hags() -> Result<String> {
                 PCWSTR(val_name.as_ptr()),
                 0,
                 windows::Win32::System::Registry::REG_DWORD,
-                Some(std::slice::from_raw_parts(&val as *const u32 as *const u8, 4)),
+                Some(std::slice::from_raw_parts(
+                    &val as *const u32 as *const u8,
+                    4,
+                )),
             );
             let _ = RegCloseKey(hkey);
             info!("HAGS disabled in registry");
@@ -462,7 +509,10 @@ fn install_service() -> Result<()> {
                 println!("OpenReality Service already installed.");
                 Ok(())
             } else {
-                Err(anyhow::anyhow!("Failed to create service: error code {}", err.0))
+                Err(anyhow::anyhow!(
+                    "Failed to create service: error code {}",
+                    err.0
+                ))
             }
         }
     }
@@ -522,5 +572,39 @@ fn stop_service_cli() -> Result<()> {
         let _ = CloseServiceHandle(scm);
         println!("Service stop requested.");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn throttling_failure_is_not_reported_as_success() {
+        let response: serde_json::Value = serde_json::from_str(&process_command(
+            r#"{"command":"disable_process_throttling","pid":0}"#,
+        ))
+        .unwrap();
+        assert_eq!(response["status"], "error");
+        assert!(response["message"]
+            .as_str()
+            .unwrap()
+            .contains("Failed to open process"));
+    }
+
+    #[test]
+    fn ping_and_invalid_requests() {
+        let ping: serde_json::Value =
+            serde_json::from_str(&process_command(r#"{"command":"ping"}"#)).unwrap();
+        assert_eq!(ping["message"], "pong");
+        for request in [
+            "{",
+            r#"{"command":"unknown"}"#,
+            r#"{"command":"use_realtime_priority"}"#,
+        ] {
+            let response: serde_json::Value =
+                serde_json::from_str(&process_command(request)).unwrap();
+            assert_eq!(response["status"], "error");
+        }
     }
 }
