@@ -37,7 +37,7 @@ Fast, open-source Virtual Desktop alternative for Windows & Linux / Quest, Pico,
 
 ## Installation
 
-TBD.
+Installing through [Obtainium](obtainium://add/github.com/Nebulynx-Prism/Aperture) or from [GitHub](https://github.com/Nebulynx-Prism/Aperture/releases) is recommended.
 
 ## AI Notice
 
