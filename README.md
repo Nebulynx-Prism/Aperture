@@ -1,12 +1,13 @@
 <div align="center">
 
-![Aperture logo](https://github.com/Nebulynx-Prism/Aperture/blob/images/images/aperture-logo.png?raw=true)
-
-Fast, open-source Virtual Desktop alternative for Windows & Linux / Quest, Pico, & Steam Frame
+<p align="center">
+  <img src="https://github.com/Nebulynx-Prism/Aperture/blob/images/images/aperture-rewrite.png?raw=true" alt="Aperture logo" width="450">
+</p>
+A new, next-generation alternative to Virtual Desktop. Available on Meta Quest, Steam Frame, & Bytedance Pico.
 
 </div>
 
-<p align="center"><img src="https://img.shields.io/badge/Rust--3178C6?logo=rust&logoColor=white" alt="Rust"> <img src="https://img.shields.io/badge/License-GPLv3-yellow" alt="License"> <img src="https://img.shields.io/badge/Version-N%2FA-brightgreen" alt="Version"></p>
+<p align="center"><img src="https://img.shields.io/badge/Rust--3178C6?logo=rust&logoColor=white" alt="Rust"> <img src="https://img.shields.io/badge/License-GPLv3-yellow" alt="License"> </p>
 
 ## System Requirements
 
@@ -15,22 +16,24 @@ Fast, open-source Virtual Desktop alternative for Windows & Linux / Quest, Pico,
 |  | Minimum | Recommended |
 | --- | --- | --- |
 | **OS** | Windows 11 24H2, Linux Mint 22, or newer. | Windows 11 (latest release), CachyOS, or other distros. |
-| **CPU** | Intel Core i5-4590 / AMD FX 8350 | Intel Core i7 (6th gen or newer) / AMD Ryzen 5 or newer |
-| **GPU** | Arc 140V, Radeon R9 290, or GeForce GTX 970 | Arc A580, Radeon RX 480, or GTX 1060 |
+| **CPU** | Intel Core i5-4590 / AMD FX 8350 / ARM Cortex-A76 | Intel Core i5 (10th gen or newer) / AMD Ryzen 3 (3000-series or newer) / Qualcomm Snapdragon 8 Gen 3 |
+| **GPU** | Arc 140V, Radeon R9 290, GTX 970, or Mali-G76 | Arc A580, Radeon RX 480, GTX 1060, or Adreno 750 |
 | **RAM** | 8GB or more | 16GB or more |
 
 > [!NOTE]
 > Most system requirements are copied from SteamVR's requirements page.
 
 > [!IMPORTANT]
-> Aperture requires SteamVR for PCVR functionality to work.
+> SteamVR needs to be installed for PCVR functionality to work.
 
 ---
 ### Client
 
 |  | Minimum | Recommended |
 | --- | --- | --- |
-| **Headsets** | Quest 2*, Quest 3S, and Pico 4 | Steam Frame, Pico 4 Ultra, Meta VR Glasses, and Quest Pro* |
+| **Quest Headsets** | Quest 2* and Quest 3/3S | Meta VR Glasses and Quest Pro* |
+| **Pico Headsets** | Pico 4 | Pico 4 Ultra |
+| **Steam Headsets** | - | Steam Frame |
 
 > [!IMPORTANT]
 > Quest 2 & Quest Pro will not support installation through the Horizon Store. Installing through Sidequest, GitHub, or Obtainium is recommended.
@@ -49,14 +52,6 @@ All code must be written by a human in pull requests as all AI code is a tempora
 
 Contributions are welcome! Please make sure all code is made without AI.
 
-## Author
-
-[![Made by Nebulynx-Prism](https://gitshow.dev/api/card/Nebulynx-Prism)](https://gitshow.dev/Nebulynx-Prism)
-
 ## License
 
 GPLv3 -- see [LICENSE](LICENSE) for details.
-
----
-
-<sub>Built with [README Builder](https://ofershap.github.io/readme-builder/) — visual drag-and-drop editor for GitHub READMEs</sub>
