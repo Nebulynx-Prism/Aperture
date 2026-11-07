@@ -60,9 +60,16 @@ android {
         }
     }
 
+    buildFeatures {
+        prefab = true
+    }
+
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // A local loader may be present for the standalone build while the
+            // Maven AAR supplies it on a clean checkout.
+            pickFirsts += "**/libopenxr_loader.so"
         }
     }
 }
@@ -71,4 +78,5 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+    implementation("org.khronos.openxr:openxr_loader_for_android:1.1.63")
 }

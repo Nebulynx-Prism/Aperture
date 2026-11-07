@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Prism Aperture</string>
+    <string name="app_description">High-performance VR desktop client for Meta Quest 2, Quest 3, and Quest 3S</string>
+    <string name="connecting">Connecting to Prism Aperture Server…</string>
+    <string name="connected">Connected</string>
+    <string name="disconnected">Disconnected. Searching for servers…</string>
+    <string name="streamer_found">Server found: %1$s (%2$s)</string>
+    <string name="no_streamers">No Prism Aperture servers detected on local network.</string>
+    <string name="settings_title">Prism Aperture Settings</string>
+    <string name="bitrate">Bitrate</string>
+    <string name="framerate">Refresh Rate</string>
+    <string name="codec">Video Codec</string>
+    <string name="curved_screen">Curved Screen</string>
+    <string name="passthrough">Passthrough Environment</string>
+    <string name="hand_tracking">Hand Tracking</string>
+</resources>

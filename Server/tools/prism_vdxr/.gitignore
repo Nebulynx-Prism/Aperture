@@ -1,0 +1,6 @@
+upstream/
+bin/
+obj/
+*.exe
+*.log
+*.patch

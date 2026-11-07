@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.nebulynx.aperture"
+    android:versionCode="20001"
+    android:versionName="0.1.0"
+    android:installLocation="auto">
+
+    <uses-sdk
+        android:minSdkVersion="29"
+        android:targetSdkVersion="32" />
+
+    <!-- OpenGL ES 3.2 required for OpenXR swapchains and low-latency decoding -->
+    <uses-feature
+        android:glEsVersion="0x00030002"
+        android:required="true" />
+
+    <!-- Meta Quest 6DoF VR Headtracking -->
+    <uses-feature
+        android:name="android.hardware.vr.headtracking"
+        android:required="true"
+        android:version="1" />
+
+    <!-- Hand Tracking V2.0 (High frequency, gesture recognition) -->
+    <uses-feature
+        android:name="oculus.software.handtracking"
+        android:required="false" />
+
+    <!-- Passthrough for Mixed Reality Desktop viewing -->
+    <uses-feature
+        android:name="com.oculus.feature.PASSTHROUGH"
+        android:required="false" />
+
+    <!-- Tracked Keyboard Support -->
+    <uses-feature
+        android:name="oculus.software.trackedkeyboard"
+        android:required="false" />
+
+    <!-- Permissions -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+    <uses-permission android:name="com.oculus.permission.EYE_TRACKING" />
+    <uses-permission android:name="com.oculus.permission.BODY_TRACKING" />
+    <uses-permission android:name="com.oculus.permission.FACE_TRACKING" />
+
+    <application
+        android:name=".PrismApertureApp"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:resizeableActivity="false"
+        android:theme="@style/Theme.PrismAperture">
+
+        <!-- Samsung VR application mode: vr_only tells Horizon OS to launch directly in VR -->
+        <meta-data
+            android:name="com.samsung.android.vr.application.mode"
+            android:value="vr_only" />
+
+        <!-- Supported devices: Quest 2, Quest Pro, Quest 3, Quest 3S -->
+        <meta-data
+            android:name="com.oculus.supportedDevices"
+            android:value="quest2|questpro|quest3" />
+
+        <!-- OpenXR Application Marker -->
+        <meta-data
+            android:name="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker"
+            android:value="true" />
+
+        <!-- Quest OS Splash Screen -->
+        <meta-data
+            android:name="com.oculus.ossplash"
+            android:value="true" />
+        <meta-data
+            android:name="com.oculus.ossplash.background"
+            android:value="black" />
+
+        <meta-data
+            android:name="com.oculus.enable_frame_sync"
+            android:value="false" />
+
+        <!-- Hand Tracking V2.0 API Version -->
+        <meta-data
+            android:name="com.oculus.handtracking.version"
+            android:value="V2.0" />
+
+        <!-- Passthrough Contextual Mode -->
+        <meta-data
+            android:name="com.oculus.feature.PASSTHROUGH"
+            android:value="passthrough-contextual" />
+
+        <!-- Dynamic CPU/GPU Clock Scaling Tuning -->
+        <meta-data
+            android:name="com.oculus.trade_cpu_for_gpu_amount"
+            android:value="1" />
+
+        <!-- Main OpenXR Native Activity -->
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:configChanges="density|fontScale|keyboard|keyboardHidden|layoutDirection|locale|mcc|mnc|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:resizeableActivity="false"
+            android:exported="true">
+
+            <!-- Critical for Horizon OS: informs Oculus runtime that this activity is VR focus aware -->
+            <meta-data
+                android:name="com.oculus.vr.focusaware"
+                android:value="true" />
+
+            <!-- Tells Horizon OS to launch this activity directly in immersive XR mode (API 31+) -->
+            <property
+                android:name="android.window.PROPERTY_ACTIVITY_STARTS_IN_IMMERSIVE_XR"
+                android:value="true" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.XR" />
+                <category android:name="com.oculus.intent.category.VR" />
+            </intent-filter>
+        </activity>
+
+    </application>
+</manifest>

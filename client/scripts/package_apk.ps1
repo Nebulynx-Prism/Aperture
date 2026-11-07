@@ -10,7 +10,6 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $ClientDir = Split-Path -Parent $PSScriptRoot
-$RootDir = Split-Path -Parent $ClientDir
 function Require-File([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Required local tool/input missing: $Path. Install it separately; this script never downloads dependencies." }
     return $Path
@@ -25,7 +24,7 @@ function Latest-Directory([string]$Path) {
     return $item.FullName
 }
 if (-not $SdkRoot) {
-    foreach ($candidate in @($env:ANDROID_SDK_ROOT, $env:ANDROID_HOME, (Join-Path $RootDir 'tools/android-sdk'), "$env:LOCALAPPDATA/Android/Sdk")) {
+    foreach ($candidate in @($env:ANDROID_SDK_ROOT, $env:ANDROID_HOME, (Join-Path $ClientDir 'tools/android-sdk'), "$env:LOCALAPPDATA/Android/Sdk")) {
         if ($candidate -and (Test-Path -LiteralPath "$candidate/build-tools")) { $SdkRoot = $candidate; break }
     }
 }
