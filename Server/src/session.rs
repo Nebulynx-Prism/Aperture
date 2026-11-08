@@ -28,6 +28,30 @@ use crate::settings::StreamerSettings;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+// Request fine timer granularity only while the streaming runtime is alive.
+// Without this, a nominal 11 ms Tokio interval can wake every 15.6 ms on Windows.
+#[cfg(windows)]
+struct StreamingTimer(bool);
+#[cfg(windows)]
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+    fn timeEndPeriod(period: u32) -> u32;
+}
+#[cfg(windows)]
+impl StreamingTimer {
+    fn new() -> Self {
+        let active = unsafe { timeBeginPeriod(1) == 0 };
+        if active { info!("Streaming timer resolution requested: 1 ms"); }
+        else { warn!("Could not request 1 ms streaming timer resolution"); }
+        Self(active)
+    }
+}
+#[cfg(windows)]
+impl Drop for StreamingTimer {
+    fn drop(&mut self) { if self.0 { unsafe { timeEndPeriod(1); } } }
+}
+
 /// Real-time streaming metrics shared between background session and UI
 pub struct StreamTelemetry {
     pub is_streaming: AtomicBool,
@@ -77,6 +101,8 @@ pub fn start_session(settings: StreamerSettings) -> SessionHandle {
     let shut_clone = Arc::clone(&shutdown_flag);
 
     std::thread::spawn(move || {
+        #[cfg(windows)]
+        let _timer = StreamingTimer::new();
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -304,6 +330,17 @@ async fn handle_client_session(
     );
     let _ = peer.send_message(msg).await;
 
+    let clock_peer=Arc::clone(&peer);
+    let clock_shutdown=Arc::clone(&session_shutdown);
+    let clock_task=tokio::spawn(async move {
+        let mut timer=tokio::time::interval(Duration::from_millis(250));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        while !clock_shutdown.load(Ordering::SeqCst) {
+            timer.tick().await;
+            if clock_peer.send_message(NetMessage::new(aperture_wire::clock::PROBE,Vec::new(),0)).await.is_err(){break;}
+        }
+    });
+
     // 1. Spawning Input Receiver Loop (TCP)
     let peer_in = Arc::clone(&peer);
     let shut_in = Arc::clone(&session_shutdown);
@@ -332,6 +369,10 @@ async fn handle_client_session(
                         if let Err(e) = bridge_in.update_tracking(&net_msg.payload) {
                             debug!("Tracking packet ignored: {e}");
                         }
+                    } else if net_msg.message_type == aperture_wire::MOTION_MESSAGE {
+                        if let Err(e)=bridge_in.update_motion(&net_msg.payload,peer_in.clock_estimate()){debug!("Motion metadata ignored: {e}");}
+                    } else if net_msg.message_type == aperture_wire::clock::REPLY {
+                        peer_in.accept_clock_reply(&net_msg.payload);
                     } else if net_msg.message_type == MessageType::ForceKeyFrame as u32 {
                         keyframe_in.store(true, Ordering::SeqCst);
                     } else if net_msg.message_type == 100 {
@@ -341,6 +382,11 @@ async fn handle_client_session(
                     } else if net_msg.message_type == MessageType::LaunchSteamVr as u32
                         || net_msg.message_type == MessageType::LaunchGame as u32
                     {
+                        if crate::runtime_switch::aperture_selected() {
+                            bridge_in.request_vr(true);
+                            let _=peer_in.send_message(NetMessage::new(104,b"ApertureXR selected. Launch an OpenXR app directly; SteamVR launch is disabled for this runtime.".to_vec(),0)).await;
+                            continue;
+                        }
                         let bridge = Arc::clone(&bridge_in);
                         let peer = Arc::clone(&peer_in);
                         let app_id = if net_msg.message_type == MessageType::LaunchSteamVr as u32 {
@@ -357,18 +403,15 @@ async fn handle_client_session(
                         tokio::spawn(async move {
                             let configured = tokio::task::spawn_blocking(
                                 crate::driver_bridge::configure_runtime,
-                            )
-                            .await;
+                            ).await;
                             let status = match configured {
                                 Ok(Ok(runtime)) => {
                                     bridge.request_vr(true);
                                     info!("PCVR requested using {}", runtime.display());
                                     let _ = std::process::Command::new("explorer.exe")
                                         .arg(format!("steam://rungameid/{app_id}"))
-                                        .creation_flags(0x08000000)
-                                        .spawn();
-                                    "PCVR starting; waiting for real SteamVR compositor frames"
-                                        .to_string()
+                                        .creation_flags(0x08000000).spawn();
+                                    "PCVR starting; waiting for real SteamVR compositor frames".to_string()
                                 }
                                 other => format!("PCVR setup failed: {other:?}"),
                             };
@@ -417,6 +460,19 @@ async fn handle_client_session(
         .await;
     });
 
+    let audio_peer = Arc::clone(&peer);
+    let audio_shutdown = Arc::clone(&session_shutdown);
+    let audio_runtime = tokio::runtime::Handle::current();
+    let audio_enabled = settings.audio_streaming != crate::settings::AudioStreaming::Disabled;
+    let virtual_cable = settings.use_virtual_audio_driver || settings.audio_streaming == crate::settings::AudioStreaming::HeadsetOnly;
+    let audio_task = tokio::task::spawn_blocking(move || {
+        if audio_enabled {
+            if let Err(e) = crate::audio::stream_audio(audio_peer, audio_shutdown, virtual_cable, audio_runtime) {
+                warn!("Audio streaming unavailable: {e:#}");
+            }
+        }
+    });
+
     // A desktop TCP session is not a PCVR compositor session. Do not infer VR
     // readiness from window titles or detach tasks when any session loop ends.
     tokio::select! {
@@ -433,6 +489,8 @@ async fn handle_client_session(
     // handle again panics; only abort and await the still-running sibling.
     stop_worker(input_task).await;
     stop_worker(video_task).await;
+    stop_worker(clock_task).await;
+    stop_worker(audio_task).await;
     info!("Session ended for client {peer_addr}");
     driver_bridge.set_connected(false);
     telemetry.connected_clients.fetch_sub(1, Ordering::SeqCst);
@@ -482,6 +540,26 @@ fn handle_input_event(injector: &mut InputInjector, data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Local timing diagnostic only; never starts streaming or changes settings.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn capture_timer_diagnostic() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let measure = || rt.block_on(async {
+            let mut clock = tokio::time::interval(Duration::from_micros(11_111));
+            clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            clock.tick().await;
+            let start = Instant::now();
+            for _ in 0..120 { clock.tick().await; }
+            120.0 / start.elapsed().as_secs_f64()
+        });
+        let normal = measure();
+        let _timer = StreamingTimer::new();
+        let fine = measure();
+        println!("capture timer wake rate: default={normal:.2} Hz requested_1ms={fine:.2} Hz target=90 Hz");
+    }
 
     #[tokio::test]
     async fn cleanup_accepts_consumed_handle_and_stops_sibling() {
@@ -629,6 +707,7 @@ async fn stream_video(
     let mut last_vr: Option<crate::driver_bridge::VrFrame> = None;
     let mut last_vr_sequence = 0u64;
     let mut last_vr_received = Instant::now();
+    let mut last_vr_requested = false;
     let mut encoded_input_index = 0u64;
     let mut pending_frame_poses: BTreeMap<u64, crate::driver_bridge::FramePose> = BTreeMap::new();
     let mut cursor = crate::cursor::CursorOverlay::new().ok();
@@ -637,11 +716,19 @@ async fn stream_video(
     let (mut frames, mut bytes) = (0u32, 0usize);
     let mut stats = Instant::now();
     let mut last_keyframe = Instant::now();
+    let (mut encode_us, mut send_us, mut inputs) = (0u128, 0u128, 0u32);
     while !shutdown.load(Ordering::SeqCst) {
         interval.tick().await;
         let mut new_vr_frame = false;
+        let vr_requested = driver_bridge.vr_requested();
+        if vr_requested != last_vr_requested {
+            last_vr_requested = vr_requested;
+            if !vr_requested {
+                last_vr = None;
+            }
+        }
         let ready = driver_bridge.status() == crate::driver_bridge::DriverStatus::Ready;
-        let wants_vr = driver_bridge.vr_requested() && ready;
+        let wants_vr = vr_requested && ready;
         if wants_vr {
             if let Some(frame) = driver_bridge.read_frame(last_vr_sequence) {
                 last_vr_sequence = frame.sequence;
@@ -650,8 +737,12 @@ async fn stream_video(
                 new_vr_frame = true;
             }
         }
-        let use_vr =
-            wants_vr && last_vr.is_some() && last_vr_received.elapsed() < Duration::from_secs(2);
+        // Keep the negotiated SBS mode during short tracking/heartbeat gaps.
+        // Requiring `ready` every loop caused desktop↔stereo reconfigurations
+        // on transient status dips, repeatedly killing and recreating FFmpeg.
+        let use_vr = vr_requested
+            && last_vr.is_some()
+            && last_vr_received.elapsed() < Duration::from_secs(2);
         let dimensions = if use_vr {
             let frame = last_vr.as_ref().unwrap();
             (frame.width, frame.height)
@@ -695,7 +786,8 @@ async fn stream_video(
             encoder.force_keyframe();
             last_keyframe = Instant::now();
         }
-        let encoded = if stereo {
+        let encode_start = Instant::now();
+        let encode_result = if stereo {
             if new_vr_frame {
                 let frame = last_vr.as_ref().unwrap();
                 encoded_input_index += 1;
@@ -708,11 +800,11 @@ async fn stream_video(
                     frame.width,
                     frame.height,
                     crate::capture::FrameFormat::Bgra8,
-                )?
+                )
             } else {
                 // Re-encoding the same compositor image at every refresh tick
                 // adds codec/network queueing without adding new visual data.
-                Vec::new()
+                Ok(Vec::new())
             }
         } else {
             if let Some(frame) = capture.capture_frame(5)? {
@@ -744,8 +836,26 @@ async fn stream_video(
             if let Some(overlay) = cursor.as_mut() {
                 overlay.restore(&mut frame.data, frame.width, frame.height)?;
             }
-            result?
+            result
         };
+        if !stereo || new_vr_frame { encode_us += encode_start.elapsed().as_micros(); inputs += 1; }
+        let encoded = match encode_result {
+            Ok(frames) => frames,
+            Err(error)
+                if ["qsv", "nvenc", "amf"]
+                    .iter()
+                    .any(|backend| encoder.active_encoder_name().contains(backend)) =>
+            {
+                warn!("Hardware encoder {} failed ({error:#}); restarting this stream on Media Foundation", encoder.active_encoder_name());
+                encoder = VideoEncoder::new_system_fallback(encoder_config.clone())?;
+                encoded_input_index = 0;
+                pending_frame_poses.clear();
+                last_keyframe = Instant::now();
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let send_start = Instant::now();
         for packet in encoded {
             if packet.data.is_empty() {
                 continue;
@@ -767,6 +877,7 @@ async fn stream_video(
             frames += 1;
             bytes += packet.data.len();
         }
+        send_us += send_start.elapsed().as_micros();
         if stats.elapsed() >= Duration::from_secs(1) {
             let seconds = stats.elapsed().as_secs_f32();
             let fps = frames as f32 / seconds;
@@ -775,13 +886,17 @@ async fn stream_video(
             *telemetry.current_bitrate_mbps.write().await = mbps;
             *telemetry.current_latency_ms.write().await = peer.latency_ms() as f32;
             info!(
-                "Streaming: {fps:.1} FPS {mbps:.2} Mbps stereo={stereo} driver={:?}",
-                driver_bridge.status()
+                "Streaming: {fps:.1} FPS {mbps:.2} Mbps stereo={stereo} driver={:?} encode_input_avg_ms={:.2} send_total_ms={:.2}",
+                driver_bridge.status(), encode_us as f64 / f64::from(inputs.max(1)) / 1000.0, send_us as f64 / 1000.0
             );
             frames = 0;
             bytes = 0;
+            encode_us = 0; send_us = 0; inputs = 0;
             stats = Instant::now();
         }
     }
     Ok(())
 }
+
+
+

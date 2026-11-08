@@ -13,6 +13,7 @@
 #include "video_decoder.hpp"
 #include "audio_player.hpp"
 #include "video_frame_pose.hpp"
+#include "motion_packet.hpp"
 
 namespace openreality {
 
@@ -38,7 +39,7 @@ public:
     void sendControllerInput(const ControllerInput& controller);
     void sendMobileSettings(const MobileSettings& settings);
 
-    void sendTrackingPacket(const TrackingPacket& packet);
+    void sendTrackingPacket(const TrackingPacket& packet,const MotionPacket* motion=nullptr);
     bool isStereoStream() const { return m_streamConfigured.load() && m_isStereoStream.load(); }
     void showDesktop();
     void launchSteamVR();

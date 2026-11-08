@@ -82,6 +82,11 @@ impl ServiceClient {
         }
     }
 
+    pub fn restore_openxr_runtime() -> Result<String> {
+        let response=Self::send_command("restore_openxr_runtime",None,None)?;
+        anyhow::ensure!(response.status=="ok", "Service error: {}", response.message);
+        Ok(response.message)
+    }
     /// Send a bounded newline-framed command with a two-second transaction deadline.
     fn send_command(
         command: &str,
@@ -253,3 +258,4 @@ mod tests {
         assert_eq!(response.message, "pong");
     }
 }
+

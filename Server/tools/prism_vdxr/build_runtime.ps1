@@ -24,3 +24,6 @@ Copy-Item -LiteralPath (Join-Path $checkout 'LICENSE') -Destination (Join-Path $
 if($LASTEXITCODE -ne 0) { throw "VDXR compilation failed ($LASTEXITCODE)" }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'prism-vdxr.json') -Destination $bin
 Write-Output "Built $bin/prism-vdxr.dll (not globally registered)"
+
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'aperture-xr.json') -Destination $bin
+

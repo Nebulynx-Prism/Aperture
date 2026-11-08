@@ -22,6 +22,9 @@ public class MainActivity extends Activity {
 
     private SurfaceTexture mVideoSurfaceTexture;
     private Surface mVideoSurface;
+    private final float[] mVideoTextureTransform = {
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -86,6 +89,7 @@ public class MainActivity extends Activity {
         }
     }
 
+
     @Override
     protected void onPause() {
         super.onPause();
@@ -129,12 +133,14 @@ public class MainActivity extends Activity {
     }
 
     // Called from C++ render loop to update hardware video frame
-    public void updateVideoTexture() {
+    public float[] updateVideoTexture() {
         if (mVideoSurfaceTexture != null) {
             try {
                 mVideoSurfaceTexture.updateTexImage();
+                mVideoSurfaceTexture.getTransformMatrix(mVideoTextureTransform);
             } catch (Exception ignored) {}
         }
+        return mVideoTextureTransform;
     }
 
     public long getVideoTextureTimestamp() {

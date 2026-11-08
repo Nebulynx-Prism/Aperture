@@ -41,7 +41,7 @@ public final class DiscoveryHelper {
         if (mIsSearching) return;
         mIsSearching = true;
         final long generation = ++mGeneration;
-        Log.i(TAG, "Starting discovery for Prism Aperture servers (Wi-Fi + USB Wired)...");
+        Log.i(TAG, "Starting discovery for Aperture servers (Wi-Fi + USB Wired)...");
 
         // 1. USB Wired option: Probe 127.0.0.1:38810 in background
         mUsbProbeThread = new Thread(() -> {
@@ -49,7 +49,7 @@ public final class DiscoveryHelper {
                 try (Socket testSocket = new Socket()) {
                     testSocket.connect(new InetSocketAddress("127.0.0.1", DEFAULT_PORT), 400);
                     Log.i(TAG, "USB Wired link verified on 127.0.0.1:" + DEFAULT_PORT);
-                    report(generation, "Prism Aperture PC (USB Wired)", InetAddress.getByName("127.0.0.1"), DEFAULT_PORT, true);
+                    report(generation, "Aperture PC (USB Wired)", InetAddress.getByName("127.0.0.1"), DEFAULT_PORT, true);
                     break;
                 } catch (Exception ignored) {
                     try { Thread.sleep(2000); } catch (InterruptedException e) { break; }
@@ -146,7 +146,7 @@ public final class DiscoveryHelper {
                             String msg = new String(responsePacket.getData(), 0, responsePacket.getLength(), "UTF-8").trim();
                             if (msg.equals("PA_SERVER") || msg.startsWith("PA_SERVER;") || msg.equals("OR_SERVER") || msg.startsWith("OR_SERVER;")) {
                                 String[] parts = msg.split(";");
-                                String name = parts.length > 1 ? parts[1] : "Prism Aperture PC";
+                                String name = parts.length > 1 ? parts[1] : "Aperture PC";
                                 int port = DEFAULT_PORT;
                                 if (parts.length > 2) {
                                     try {

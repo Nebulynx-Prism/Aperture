@@ -109,6 +109,24 @@ pub struct VideoEncoder {
 impl VideoEncoder {
     /// Create a new video encoder with the specified configuration
     pub fn new(config: EncoderConfig) -> Result<Self> {
+        let hw_encoders = detect_hardware_encoders();
+        let selected_encoder = select_best_encoder(config.codec, config.use_hardware, &hw_encoders);
+        Self::with_encoder(config, selected_encoder)
+    }
+
+    /// Retry a failed hardware encoder through Windows Media Foundation.
+    /// Keep the same codec and dimensions so the client stream configuration
+    /// remains valid; the replacement encoder starts with fresh parameter sets.
+    pub fn new_system_fallback(config: EncoderConfig) -> Result<Self> {
+        let encoder = match config.codec {
+            VideoCodec::H264 => "h264_mf",
+            VideoCodec::Hevc => "hevc_mf",
+            VideoCodec::Av1 => bail!("AV1 streaming requires an OBU temporal-unit packetizer"),
+        };
+        Self::with_encoder(config, encoder.to_string())
+    }
+
+    fn with_encoder(config: EncoderConfig, selected_encoder: String) -> Result<Self> {
         if config.width == 0
             || config.height == 0
             || config.width % 2 != 0
@@ -130,9 +148,6 @@ impl VideoEncoder {
 
         let binary = find_encoder_binary()
             .context("FFmpeg not found; compressed video encoding is required")?;
-        let hw_encoders = detect_hardware_encoders();
-        let selected_encoder = select_best_encoder(config.codec, config.use_hardware, &hw_encoders);
-
         info!("Selected encoder backend: {selected_encoder}");
 
         let mut encoder = Self {
@@ -202,6 +217,11 @@ impl VideoEncoder {
         ];
 
         if self.active_encoder_name.contains("qsv") {
+            if let Some(adapter) = preferred_qsv_adapter() {
+                // FFmpeg otherwise picks the default Intel adapter, which can
+                // be an iGPU when an Arc card is installed alongside it.
+                args.splice(0..0, ["-qsv_device".to_string(), adapter.to_string()]);
+            }
             args.extend([
                 "-preset".to_string(),
                 "veryfast".to_string(),
@@ -420,10 +440,7 @@ impl VideoEncoder {
                 return Ok(Vec::new());
             }
             Err(RecvTimeoutError::Disconnected) => {
-                bail!(
-                    "FFmpeg output closed or output queue overflowed: {}",
-                    self.stderr_text()
-                )
+                bail!("FFmpeg output closed or output queue overflowed: {}", self.stderr_text())
             }
         }
         loop {
@@ -664,6 +681,36 @@ fn find_encoder_binary() -> Option<PathBuf> {
 
     let reference = PathBuf::from(r"C:\Program Files\Virtual Desktop Streamer\ffmpeg.exe");
     reference.is_file().then_some(reference)
+}
+
+/// Choose Intel Arc explicitly when present; otherwise use the first Intel
+/// adapter. FFmpeg's QSV device option accepts the DirectX adapter index.
+fn preferred_qsv_adapter() -> Option<u32> {
+    #[cfg(windows)]
+    {
+        use std::sync::OnceLock;
+        static ADAPTER: OnceLock<Option<u32>> = OnceLock::new();
+        return *ADAPTER.get_or_init(|| unsafe {
+            let factory = CreateDXGIFactory1::<IDXGIFactory1>().ok()?;
+            let mut index = 0;
+            let mut first_intel = None;
+            while let Ok(adapter) = factory.EnumAdapters1(index) {
+                if let Ok(desc) = adapter.GetDesc1() {
+                    if desc.VendorId == 0x8086 {
+                        let end = desc.Description.iter().position(|c| *c == 0).unwrap_or(desc.Description.len());
+                        let name = String::from_utf16_lossy(&desc.Description[..end]);
+                        info!("Intel QSV candidate DXGI adapter {index}: {name}");
+                        if first_intel.is_none() { first_intel = Some(index); }
+                        if name.to_ascii_lowercase().contains("arc") { return Some(index); }
+                    }
+                }
+                index += 1;
+            }
+            first_intel
+        });
+    }
+    #[cfg(not(windows))]
+    { None }
 }
 
 /// Select best available encoder for codec

@@ -323,7 +323,7 @@ void VRGui::redraw() {
         // Card 1: Wired USB-C Direct Link (ID: 11)
         int usbY = contY + 54;
         drawRoundRect(40, usbY, UI_WIDTH - 80, 116, 12, COL_INNER_CARD, COL_BORDER);
-        drawText(65, usbY + 20, "Prism Aperture PC (USB-C Wired Link)", COL_WHITE, 1.05f);
+        drawText(65, usbY + 20, "Aperture PC (USB-C Wired Link)", COL_WHITE, 1.05f);
         drawText(65, usbY + 54, "Endpoint: 127.0.0.1:38810 (USB forwarding)", COL_SILVER, 0.80f);
         drawText(65, usbY + 80, m_usbFound ? "Status: USB Link Active & Ready" : "Status: Ready (Connect USB-C Cable)",
                  m_usbFound ? COL_GREEN : COL_YELLOW, 0.78f);
@@ -338,7 +338,7 @@ void VRGui::redraw() {
         // Card 2: Wi-Fi Wireless LAN (ID: 13)
         int wifiY = usbY + 128;
         drawRoundRect(40, wifiY, UI_WIDTH - 80, 116, 12, COL_INNER_CARD, COL_BORDER);
-        std::string wTitle = m_wifiFound ? m_wifiServerName : "Prism Aperture PC (Wi-Fi Wireless)";
+        std::string wTitle = m_wifiFound ? m_wifiServerName : "Aperture PC (Wi-Fi Wireless)";
         drawText(65, wifiY + 20, wTitle, COL_WHITE, 1.05f);
         std::string wEp = "Endpoint: " + m_wifiServerHost + ":" + std::to_string(m_wifiServerPort) + " (High-Speed Local Wi-Fi)";
         drawText(65, wifiY + 54, wEp, COL_SILVER, 0.80f);

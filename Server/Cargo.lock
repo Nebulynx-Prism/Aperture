@@ -235,6 +235,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "aperture-wire"
+version = "0.1.0"
+
+[[package]]
 name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3695,6 +3699,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "aperture-wire",
  "base64 0.22.1",
  "bytemuck",
  "chrono",
@@ -3710,6 +3715,7 @@ dependencies = [
  "prost",
  "prost-types",
  "rand 0.8.8",
+ "semver",
  "serde",
  "serde_json",
  "socket2 0.5.10",

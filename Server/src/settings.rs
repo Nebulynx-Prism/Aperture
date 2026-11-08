@@ -58,7 +58,8 @@ impl Default for GamepadEmulation {
 pub enum OpenXRRuntime {
     Automatic,
     SteamVR,
-    OpenReality,
+    #[serde(alias = "OpenReality")]
+    ApertureXR,
 }
 
 impl Default for OpenXRRuntime {
@@ -89,6 +90,12 @@ pub struct StreamerSettings {
     pub vd_accounts: Vec<VdAccount>,
 
     // Startup
+    #[serde(default)]
+    pub auto_check_updates: bool,
+    #[serde(default)]
+    pub skipped_update_version: Option<String>,
+    #[serde(default)]
+    pub show_console: bool,
     pub start_with_windows: bool,
     pub start_minimized_in_tray: bool,
 
@@ -163,6 +170,9 @@ impl Default for StreamerSettings {
                 enabled: true,
             }],
 
+            auto_check_updates: false,
+            skipped_update_version: None,
+            show_console: false,
             start_with_windows: false,
             start_minimized_in_tray: false,
 
@@ -330,3 +340,28 @@ impl Default for DynamicSettings {
         }
     }
 }
+
+
+
+#[cfg(test)]
+mod preference_migration_tests {
+    use super::*;
+    #[test]
+    fn old_settings_keep_identity_and_hide_console() {
+        let original=StreamerSettings::default();
+        let mut value=serde_json::to_value(&original).unwrap();
+        value.as_object_mut().unwrap().remove("show_console");
+        value["openxr_runtime"]=serde_json::Value::String("OpenReality".into());
+        let loaded:StreamerSettings=serde_json::from_value(value).unwrap();
+        assert!(!loaded.show_console);
+        assert_eq!(loaded.computer_id,original.computer_id);
+        assert_eq!(loaded.openxr_runtime,OpenXRRuntime::ApertureXR);
+    }
+    #[test]
+    fn console_preference_roundtrips() {
+        let mut original=StreamerSettings::default(); original.show_console=true;
+        let loaded:StreamerSettings=serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+        assert!(loaded.show_console);
+    }
+}
+

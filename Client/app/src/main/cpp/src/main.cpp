@@ -170,7 +170,9 @@ static void runRenderLoop(ClientEngine* engine) {
         bool shouldRender = false;
         if (engine->openxr->beginFrame(shouldRender)) {
             engine->input->update(engine->openxr->getPredictedTime(), engine->openxr->getLocalSpace());
-            engine->network->sendTrackingPacket(engine->openxr->sampleTracking(*engine->input));
+            const auto tracking=engine->openxr->sampleTracking(*engine->input);
+            const auto motion=engine->openxr->sampleMotion(*engine->input,tracking.sample_time_us);
+            engine->network->sendTrackingPacket(tracking,&motion);
             const bool stereoReady = engine->network->isConnected() && engine->serverVrMode.load()
                 && engine->network->isStereoStream() && engine->decoder->hasOutputFrame();
             engine->gui->setVrMode(stereoReady);
@@ -229,7 +231,16 @@ static void runRenderLoop(ClientEngine* engine) {
 
         // Latch latest hardware video frame from SurfaceTexture
         if (env && engine->updateVideoTexMid && engine->activityObj) {
-            env->CallVoidMethod(engine->activityObj, engine->updateVideoTexMid);
+            auto transformArray = static_cast<jfloatArray>(env->CallObjectMethod(engine->activityObj, engine->updateVideoTexMid));
+            if (transformArray) {
+                jfloat transform[16];
+                env->GetFloatArrayRegion(transformArray, 0, 16, transform);
+                if (!env->ExceptionCheck()) engine->openxr->setVideoTextureTransform(transform);
+                else env->ExceptionClear();
+                env->DeleteLocalRef(transformArray);
+            } else if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
             VideoFramePose pose{};
             if(engine->getVideoTimestampMid){jlong timestamp=env->CallLongMethod(engine->activityObj,engine->getVideoTimestampMid);if(timestamp>0)pose=engine->decoder->framePose(static_cast<uint64_t>(timestamp/1000));}
             engine->openxr->setVideoPose(pose);
@@ -329,7 +340,7 @@ Java_org_nebulynx_aperture_MainActivity_nativeInit(
 
     // 4. Initialize Hardware Video Decoder with off-screen SurfaceTexture
     jclass actCls = env->GetObjectClass(activity);
-    engine->updateVideoTexMid = env->GetMethodID(actCls, "updateVideoTexture", "()V");
+    engine->updateVideoTexMid = env->GetMethodID(actCls, "updateVideoTexture", "()[F");
     engine->getVideoTimestampMid = env->GetMethodID(actCls, "getVideoTextureTimestamp", "()J");
 
     glGenTextures(1, &engine->videoTextureId);
@@ -441,7 +452,7 @@ Java_org_nebulynx_aperture_MainActivity_nativeSetDiscoveredServer(
 
     const char* nStr = env->GetStringUTFChars(name, nullptr);
     const char* hStr = env->GetStringUTFChars(host, nullptr);
-    std::string nameString = nStr ? nStr : "Prism Aperture PC";
+    std::string nameString = nStr ? nStr : "Aperture PC";
     std::string hostString = hStr ? hStr : "127.0.0.1";
     env->ReleaseStringUTFChars(name, nStr);
     env->ReleaseStringUTFChars(host, hStr);

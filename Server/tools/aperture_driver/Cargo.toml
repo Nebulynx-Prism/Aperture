@@ -1,0 +1,21 @@
+[package]
+name = "aperture-driver"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+aperture-wire = { path = "../../crates/aperture-wire" }
+serde_json = "1"
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+
+[workspace]

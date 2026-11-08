@@ -217,11 +217,21 @@ bool OpenXRContext::initOpenXRInstance(void* vm, void* activity) {
         XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME,
         XR_FB_PASSTHROUGH_EXTENSION_NAME
     };
+    uint32_t extensionCount=0;
+    if(XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(nullptr,0,&extensionCount,nullptr))) {
+        std::vector<XrExtensionProperties> extensions(extensionCount,{XR_TYPE_EXTENSION_PROPERTIES});
+        if(XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(nullptr,extensionCount,&extensionCount,extensions.data()))) {
+            for(const auto& extension:extensions) {
+                if(std::strcmp(extension.extensionName,XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME)==0)
+                    enabledExtensions.push_back(XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME);
+            }
+        }
+    }
 
     XrInstanceCreateInfo createInfo{XR_TYPE_INSTANCE_CREATE_INFO};
-    std::strncpy(createInfo.applicationInfo.applicationName, "Prism Aperture", XR_MAX_APPLICATION_NAME_SIZE);
+    std::strncpy(createInfo.applicationInfo.applicationName, "Aperture", XR_MAX_APPLICATION_NAME_SIZE);
     createInfo.applicationInfo.applicationVersion = 1;
-    std::strncpy(createInfo.applicationInfo.engineName, "Prism Aperture XR", XR_MAX_ENGINE_NAME_SIZE);
+    std::strncpy(createInfo.applicationInfo.engineName, "Aperture XR", XR_MAX_ENGINE_NAME_SIZE);
     createInfo.applicationInfo.engineVersion = 1;
     createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
     createInfo.enabledExtensionCount = (uint32_t)enabledExtensions.size();
@@ -243,6 +253,7 @@ bool OpenXRContext::initOpenXRInstance(void* vm, void* activity) {
     }
 
     // 4. Function pointers
+    xrGetInstanceProcAddr(m_instance,"xrConvertTimeToTimespecTimeKHR",reinterpret_cast<PFN_xrVoidFunction*>(&m_convertTime));
     xrGetInstanceProcAddr(m_instance, "xrGetDisplayRefreshRateFB", (PFN_xrVoidFunction*)&pfn_xrGetDisplayRefreshRateFB);
     xrGetInstanceProcAddr(m_instance, "xrRequestDisplayRefreshRateFB", (PFN_xrVoidFunction*)&pfn_xrRequestDisplayRefreshRateFB);
     xrGetInstanceProcAddr(m_instance, "xrEnumerateDisplayRefreshRatesFB", (PFN_xrVoidFunction*)&pfn_xrEnumerateDisplayRefreshRatesFB);
@@ -408,7 +419,10 @@ bool OpenXRContext::initGraphics() {
         uniform vec4 u_SourceFov;
         uniform vec4 u_RotationDelta;
         uniform int u_Reproject;
+        uniform int u_Stereo;
         uniform int u_Eye;
+        uniform int u_FlipY;
+        uniform mat4 u_TextureTransform;
         out vec4 FragColor;
         void main() {
             vec2 uv=v_UV;
@@ -420,9 +434,14 @@ bool OpenXRContext::initGraphics() {
                 uv.x=(ray.x/depth-u_SourceFov.x)/(u_SourceFov.y-u_SourceFov.x);
                 uv.y=(u_SourceFov.z-ray.y/depth)/(u_SourceFov.z-u_SourceFov.w);
             }
+            // Mesh UVs start at the top. SurfaceTexture's transform expects
+            // bottom-origin GL coordinates, for both desktop and stereo video.
+            if(u_FlipY!=0) uv.y=1.0-uv.y;
             if(any(lessThan(uv,vec2(0.0)))||any(greaterThan(uv,vec2(1.0)))){FragColor=vec4(0.0,0.0,0.0,1.0);return;}
-            vec2 stereoUv=vec2((float(u_Eye)+uv.x)*0.5,uv.y);
-            vec4 col = texture(u_Texture, stereoUv);
+            vec2 frameUv=uv;
+            if(u_Stereo!=0) frameUv.x=(float(u_Eye)+uv.x)*0.5;
+            vec2 sampleUv=(u_TextureTransform*vec4(frameUv,0.0,1.0)).xy;
+            vec4 col = texture(u_Texture, sampleUv);
             // MediaCodec supplies display-encoded RGB; the OpenXR compositor
             // consumes linear-light RGBA8. Decode once before composition.
             vec3 rgb = mix(col.rgb / 12.92, pow((col.rgb + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), col.rgb));
@@ -681,6 +700,8 @@ bool OpenXRContext::beginFrame(bool& outShouldRender) {
     m_headValid = false;
     m_viewsValid = false;
     XrSpaceLocation headLocation{XR_TYPE_SPACE_LOCATION};
+    m_headVelocity={XR_TYPE_SPACE_VELOCITY};
+    headLocation.next=&m_headVelocity;
     const auto headFlags = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
     if (xrLocateSpace(m_viewSpace, m_localSpace, m_frameState.predictedDisplayTime, &headLocation) == XR_SUCCESS
         && (headLocation.locationFlags & headFlags) == headFlags) {
@@ -706,6 +727,28 @@ bool OpenXRContext::beginFrame(bool& outShouldRender) {
     m_viewsValid = true;
     if (!outShouldRender) endFrameEmpty();
     return true;
+}
+
+MotionPacket OpenXRContext::sampleMotion(const InputManager& input,uint64_t sampleUs) const {
+    MotionPacket packet;packet.sampleUs=sampleUs;
+    struct timespec target{};
+    if(!m_convertTime || XR_FAILED(m_convertTime(m_instance,m_frameState.predictedDisplayTime,&target))) return packet;
+    packet.targetLeadNs=int64_t(target.tv_sec)*1000000000LL+target.tv_nsec-int64_t(sampleUs)*1000LL;
+    if(packet.targetLeadNs<0 || packet.targetLeadNs>200000000LL) return packet;
+    packet.timingValid=1;
+    auto copy=[&](int device,const XrSpaceVelocity& velocity,bool valid) {
+        if(!valid)return;
+        const bool linear=(velocity.velocityFlags&XR_SPACE_VELOCITY_LINEAR_VALID_BIT)!=0;
+        const bool angular=(velocity.velocityFlags&XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)!=0;
+        const float values[6]={velocity.linearVelocity.x,velocity.linearVelocity.y,velocity.linearVelocity.z,
+            velocity.angularVelocity.x,velocity.angularVelocity.y,velocity.angularVelocity.z};
+        for(float value:values)if(!std::isfinite(value))return;
+        packet.flags[device]=(linear?1u:0u)|(angular?2u:0u);
+        std::copy(values,values+6,packet.velocity[device]);
+    };
+    copy(0,m_headVelocity,m_headValid);
+    for(int hand=0;hand<2;++hand)copy(hand+1,input.getGripVelocity(hand),input.isGripPoseValid(hand));
+    return packet;
 }
 
 TrackingPacket OpenXRContext::sampleTracking(const InputManager& input) const {
@@ -913,6 +956,7 @@ void OpenXRContext::drawFullscreenVrEye(int eye, uint32_t textureId) {
     glUniformMatrix4fv(locMVP, 1, GL_FALSE, model);
     glUniform4f(locTint, 1.0f, 1.0f, 1.0f, 1.0f);
     if(isOes){
+        glUniformMatrix4fv(glGetUniformLocation(prog,"u_TextureTransform"),1,GL_FALSE,m_videoTextureTransform.data());
         const auto& target=m_views[eye].fov;
         const auto& source=m_videoPose.fov+(eye*4);
         const auto& current=m_views[eye].pose.orientation;
@@ -926,6 +970,8 @@ void OpenXRContext::drawFullscreenVrEye(int eye, uint32_t textureId) {
         const bool smallRotation=std::abs(dw)>=0.94f;
         const bool reproject=fresh&&smallRotation&&m_viewsValid;
         glUniform1i(glGetUniformLocation(prog,"u_Eye"),eye);
+        glUniform1i(glGetUniformLocation(prog,"u_Stereo"),1);
+        glUniform1i(glGetUniformLocation(prog,"u_FlipY"),1);
         glUniform1i(glGetUniformLocation(prog,"u_Reproject"),reproject?1:0);
         glUniform4f(glGetUniformLocation(prog,"u_TargetFov"),std::tan(target.angleLeft),std::tan(target.angleRight),std::tan(target.angleUp),std::tan(target.angleDown));
         glUniform4f(glGetUniformLocation(prog,"u_SourceFov"),std::tan(source[0]),std::tan(source[1]),std::tan(source[2]),std::tan(source[3]));
@@ -950,6 +996,15 @@ void OpenXRContext::drawDesktopScreen(const float viewProj[16], uint32_t texture
     bool isOes = (textureId != m_standbyTexId && textureId != 0 && m_oesVideoProg != 0);
     GLuint prog = isOes ? m_oesVideoProg : m_screenProg;
     glUseProgram(prog);
+    if (isOes) {
+        glUniformMatrix4fv(glGetUniformLocation(prog,"u_TextureTransform"),1,GL_FALSE,m_videoTextureTransform.data());
+        // Uniforms persist across draws and mode changes. Desktop video is a
+        // full mono frame, never an eye crop or a reprojected PCVR frame.
+        glUniform1i(glGetUniformLocation(prog,"u_Stereo"),0);
+        glUniform1i(glGetUniformLocation(prog,"u_Eye"),0);
+        glUniform1i(glGetUniformLocation(prog,"u_Reproject"),0);
+        glUniform1i(glGetUniformLocation(prog,"u_FlipY"),1);
+    }
 
     GLint locTex = glGetUniformLocation(prog, "u_Texture");
     if (locTex >= 0) glUniform1i(locTex, 0);
@@ -989,7 +1044,11 @@ void OpenXRContext::drawDesktopScreen(const float viewProj[16], uint32_t texture
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     } else {
         // Curved Cylindrical screen (already subdivided at radius 2.2m)
-        model[0] = aspectScale * scale;
+        // The curved mesh is not square: its arc width is radius * arc angle.
+        // Compensate for that geometry so its displayed pixel ratio matches
+        // the decoded desktop frame (for example 1920x1200).
+        constexpr float curvedMeshAspect = (2.2f * 1.0472f) / 1.24f;
+        model[0] = (aspect / curvedMeshAspect) * scale;
         model[5] = scale;
         float mvp[16];
         mat4Multiply(mvp, viewProj, model);

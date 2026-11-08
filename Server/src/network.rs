@@ -555,6 +555,7 @@ impl Drop for StreamServer {
 /// Video and audio frames travel over UDP (for Wi-Fi) or TCP (for USB wired)
 /// with independent reading and writing halves to prevent deadlock.
 pub struct PeerConnection {
+    clock_sync: std::sync::Mutex<aperture_wire::clock::Sync>,
     tcp_reader: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
     tcp_writer: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
     udp: Arc<UdpSocket>,
@@ -572,6 +573,7 @@ impl PeerConnection {
         let is_loopback = peer_addr.ip().is_loopback();
         let (tcp_reader, tcp_writer) = tcp.into_split();
         Self {
+            clock_sync: std::sync::Mutex::new(aperture_wire::clock::Sync::default()),
             tcp_reader: Arc::new(Mutex::new(tcp_reader)),
             tcp_writer: Arc::new(Mutex::new(tcp_writer)),
             udp: Arc::new(udp),
@@ -590,11 +592,16 @@ impl PeerConnection {
     /// Send a `NetMessage` over the TCP control channel.
     ///
     /// Wire format: `[4-byte big-endian length][protobuf payload]`
-    pub async fn send_message(&self, msg: NetMessage) -> Result<()> {
+    pub async fn send_message(&self, mut msg: NetMessage) -> Result<()> {
+        let mut writer = self.tcp_writer.lock().await;
+        if msg.message_type==aperture_wire::clock::PROBE {
+            let sent=aperture_wire::clock::host_now_ns();
+            msg.payload=sent.to_le_bytes().to_vec();
+            if let Ok(mut clock)=self.clock_sync.lock(){clock.sent(sent);}
+        }
         let data = msg.serialize();
         let len = (data.len() as u32).to_be_bytes();
 
-        let mut writer = self.tcp_writer.lock().await;
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             writer.write_all(&len).await?;
             writer.write_all(&data).await?;
@@ -611,6 +618,16 @@ impl PeerConnection {
             self.peer_addr
         );
         Ok(())
+    }
+
+    pub fn accept_clock_reply(&self,payload:&[u8]) {
+        let now=aperture_wire::clock::host_now_ns();
+        if let Ok(mut clock)=self.clock_sync.lock(){
+            if clock.reply(payload,now){if let Some(estimate)=clock.estimate(now){self.rtt_us.store(estimate.rtt_ns/1000,Ordering::Relaxed);}}
+        }
+    }
+    pub fn clock_estimate(&self)->Option<aperture_wire::clock::Estimate>{
+        self.clock_sync.lock().ok()?.estimate(aperture_wire::clock::host_now_ns())
     }
 
     /// Receive the next `NetMessage` from the TCP control channel.
@@ -904,7 +921,7 @@ pub async fn upnp_open_port(port: u16) -> Result<()> {
                     port,
                     SocketAddr::V4(local_addr),
                     3600,
-                    "Prism Aperture Server",
+                    "Aperture Server",
                 )?;
                 info!("UPnP: port {port} opened on gateway {}", gateway.addr);
                 Ok(())

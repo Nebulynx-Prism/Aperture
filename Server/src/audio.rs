@@ -13,14 +13,15 @@ use anyhow::{bail, Context, Result};
 use tracing::{debug, error, info, warn};
 use windows::core::GUID;
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IAudioRenderClient,
-    IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator,
-    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-    DEVICE_STATE_ACTIVE, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice,
+    IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT,
+    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
+    WAVEFORMATEXTENSIBLE,
 };
 
 const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
-const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
+const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: GUID =
+    GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
     COINIT_MULTITHREADED, STGM_READ,
@@ -201,14 +202,10 @@ unsafe fn enumerate_direction(
 
 /// Read the friendly name or derive from device id.
 unsafe fn get_device_friendly_name(device: &IMMDevice) -> Result<String> {
-    if let Ok(pwstr) = device.GetId() {
-        let id_str = pwstr.to_string().unwrap_or_default();
-        CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
-        if !id_str.is_empty() {
-            return Ok(format!("Audio Device ({})", &id_str[id_str.len().saturating_sub(8)..]));
-        }
-    }
-    Ok("Default Audio Device".to_string())
+    use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+    let store = device.OpenPropertyStore(STGM_READ)?;
+    let value = store.GetValue(&PKEY_Device_FriendlyName)?;
+    Ok(value.to_string())
 }
 
 // ─── AudioCapture (WASAPI Loopback) ─────────────────────────────────────────
@@ -333,7 +330,8 @@ impl AudioCapture {
 
         unsafe {
             loop {
-                let packet_length = self.capture_client
+                let packet_length = self
+                    .capture_client
                     .GetNextPacketSize()
                     .context("GetNextPacketSize")?;
 
@@ -503,9 +501,7 @@ impl MicrophonePlayback {
 
             CoTaskMemFree(Some(wfx_ptr as *const _ as *const _));
 
-            let buffer_frame_count = client
-                .GetBufferSize()
-                .context("GetBufferSize")?;
+            let buffer_frame_count = client.GetBufferSize().context("GetBufferSize")?;
 
             let render_client: IAudioRenderClient = client
                 .GetService()
@@ -534,7 +530,9 @@ impl MicrophonePlayback {
             return Ok(());
         }
         unsafe {
-            self.client.Start().context("IAudioClient::Start (render)")?;
+            self.client
+                .Start()
+                .context("IAudioClient::Start (render)")?;
         }
         self.playing.store(true, Ordering::SeqCst);
         info!("Microphone playback started");
@@ -548,7 +546,9 @@ impl MicrophonePlayback {
         }
         unsafe {
             self.client.Stop().context("IAudioClient::Stop (render)")?;
-            self.client.Reset().context("IAudioClient::Reset (render)")?;
+            self.client
+                .Reset()
+                .context("IAudioClient::Reset (render)")?;
         }
         self.playing.store(false, Ordering::SeqCst);
         info!("Microphone playback stopped");
@@ -564,8 +564,7 @@ impl MicrophonePlayback {
             bail!("MicrophonePlayback is not started");
         }
 
-        if format.sample_rate != self.format.sample_rate
-            || format.channels != self.format.channels
+        if format.sample_rate != self.format.sample_rate || format.channels != self.format.channels
         {
             warn!(
                 "Format mismatch: source={}Hz/{}ch, device={}Hz/{}ch — samples may be distorted",
@@ -624,21 +623,22 @@ impl Drop for MicrophonePlayback {
 
 /// Parse a `WAVEFORMATEX` (potentially `WAVEFORMATEXTENSIBLE`) into an [`AudioFormat`].
 unsafe fn parse_wave_format(wfx: &WAVEFORMATEX) -> Result<AudioFormat> {
-    let mut bits = wfx.wBitsPerSample;
-
-    // If the format tag is WAVE_FORMAT_EXTENSIBLE, read the valid bits and
-    // verify the sub-format is IEEE float.
-    if wfx.wFormatTag == WAVE_FORMAT_EXTENSIBLE as u16 {
+    let float_format = if wfx.wFormatTag == WAVE_FORMAT_EXTENSIBLE {
+        anyhow::ensure!(wfx.cbSize >= 22, "Truncated extensible audio format");
         let ext = &*(wfx as *const WAVEFORMATEX as *const WAVEFORMATEXTENSIBLE);
-        bits = ext.Samples.wValidBitsPerSample;
-        let sub_format = ptr::read_unaligned(ptr::addr_of!(ext.SubFormat));
-        if sub_format != KSDATAFORMAT_SUBTYPE_IEEE_FLOAT {
-            warn!(
-                "WASAPI mix format subtype is not IEEE_FLOAT; captured data may need conversion"
-            );
-        }
-    }
-
+        ptr::read_unaligned(ptr::addr_of!(ext.SubFormat)) == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+    } else {
+        wfx.wFormatTag == 3
+    };
+    anyhow::ensure!(
+        float_format
+            && wfx.wBitsPerSample == 32
+            && wfx.nChannels > 0
+            && wfx.nSamplesPerSec > 0
+            && u32::from(wfx.nBlockAlign) == u32::from(wfx.nChannels) * 4,
+        "WASAPI capture requires a packed 32-bit float mix format"
+    );
+    let bits = wfx.wBitsPerSample;
     Ok(AudioFormat {
         sample_rate: wfx.nSamplesPerSec,
         channels: wfx.nChannels,
@@ -662,7 +662,10 @@ mod tests {
 
     #[test]
     fn audio_streaming_default() {
-        assert_eq!(AudioStreaming::default(), AudioStreaming::HeadsetAndComputer);
+        assert_eq!(
+            AudioStreaming::default(),
+            AudioStreaming::HeadsetAndComputer
+        );
     }
 
     #[test]
@@ -671,5 +674,134 @@ mod tests {
         let json = serde_json::to_string(&val).unwrap();
         let back: AudioStreaming = serde_json::from_str(&json).unwrap();
         assert_eq!(val, back);
+    }
+}
+
+/// VB-CABLE's render endpoint is CABLE Input; apps route their sound into it.
+pub fn is_vb_cable_render(device: &AudioDeviceInfo) -> bool {
+    let name = device.name.to_ascii_lowercase();
+    !device.is_input && name.contains("cable input") && name.contains("vb-audio")
+}
+
+/// Stateful float PCM to 48 kHz stereo signed little-endian PCM for the Quest player.
+#[derive(Default)]
+struct StereoPcm {
+    frames: Vec<[f32; 2]>,
+    phase: f64,
+}
+impl StereoPcm {
+    fn convert(&mut self, samples: &AudioSamples) -> Result<Vec<u8>> {
+        let channels = samples.format.channels as usize;
+        anyhow::ensure!(
+            channels > 0 && samples.format.sample_rate > 0,
+            "Invalid audio format"
+        );
+        for frame in samples.data.chunks_exact(channels) {
+            self.frames
+                .push([frame[0], frame[if channels > 1 { 1 } else { 0 }]]);
+        }
+        let step = samples.format.sample_rate as f64 / 48000.0;
+        let mut output = Vec::new();
+        while self.phase + 1.0 < self.frames.len() as f64 {
+            let i = self.phase as usize;
+            let fraction = (self.phase - i as f64) as f32;
+            for ch in 0..2 {
+                let value =
+                    self.frames[i][ch] * (1.0 - fraction) + self.frames[i + 1][ch] * fraction;
+                let value = if value.is_finite() {
+                    value.clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                };
+                output.extend_from_slice(&((value * 32767.0).round() as i16).to_le_bytes());
+            }
+            self.phase += step;
+        }
+        let consumed = (self.phase as usize).min(self.frames.len());
+        self.frames.drain(..consumed);
+        self.phase -= consumed as f64;
+        Ok(output)
+    }
+}
+
+/// Run WASAPI on one dedicated COM thread, separate from video and the UI.
+pub fn stream_audio(
+    peer: std::sync::Arc<crate::network::PeerConnection>,
+    shutdown: std::sync::Arc<AtomicBool>,
+    virtual_cable: bool,
+    runtime: tokio::runtime::Handle,
+) -> Result<()> {
+    let mut capture = AudioCapture::new()?;
+    if virtual_cable {
+        let device = enumerate_audio_devices()?
+            .into_iter()
+            .find(is_vb_cable_render)
+            .context("VB-CABLE not found: install VB-CABLE and route the app to CABLE Input")?;
+        capture.set_device(&device.id)?;
+        info!("Audio capture using {}", device.name);
+    }
+    capture.start()?;
+    let mut pcm = StereoPcm::default();
+    while !shutdown.load(Ordering::SeqCst) {
+        if let Some(samples) = capture.read_samples()? {
+            let bytes = pcm.convert(&samples)?;
+            // Keep stereo sample frames intact and audio packets comfortably below MTU.
+            for chunk in bytes.chunks(960) {
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+                runtime
+                    .block_on(async {
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(500),
+                            peer.send_audio_samples(chunk),
+                        )
+                        .await
+                    })
+                    .context("Audio send timeout")??;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    capture.stop()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    #[test]
+    fn cable_direction_is_not_reversed() {
+        let mut d = AudioDeviceInfo {
+            id: String::new(),
+            name: "CABLE Input (VB-Audio Virtual Cable)".into(),
+            is_default: false,
+            is_input: false,
+        };
+        assert!(is_vb_cable_render(&d));
+        d.is_input = true;
+        assert!(!is_vb_cable_render(&d));
+        d.is_input = false;
+        d.name = "Speakers".into();
+        assert!(!is_vb_cable_render(&d));
+    }
+    #[test]
+    fn pcm_conversion_keeps_boundary_and_stereo_alignment() {
+        let mut converter = StereoPcm::default();
+        let samples = AudioSamples {
+            data: vec![1.0, 1.0, 1.0],
+            format: AudioFormat {
+                sample_rate: 24000,
+                channels: 1,
+                bits_per_sample: 32,
+            },
+            timestamp: Instant::now(),
+        };
+        let first = converter.convert(&samples).unwrap();
+        let second = converter.convert(&samples).unwrap();
+        assert_eq!(first.len() + second.len(), 10 * 4);
+        assert!(first
+            .chunks_exact(2)
+            .all(|b| i16::from_le_bytes([b[0], b[1]]) == 32767));
     }
 }

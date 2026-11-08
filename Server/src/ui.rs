@@ -24,7 +24,7 @@ pub fn run(settings: StreamerSettings) -> Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([720.0, 560.0])
         .with_min_inner_size([620.0, 480.0])
-        .with_title("Prism Aperture Server")
+        .with_title("Aperture Server")
         .with_decorations(true)
         .with_resizable(true);
 
@@ -38,7 +38,7 @@ pub fn run(settings: StreamerSettings) -> Result<()> {
     };
 
     eframe::run_native(
-        "Prism Aperture Server",
+        "Aperture Server",
         options,
         Box::new(|cc| {
             // Install image loaders for PNG, JPEG, SVG, WebP, etc.
@@ -72,6 +72,8 @@ enum AppTab {
     AudioInput,
     Displays,
     VdAccountsModal,
+    Updates,
+    Settings,
 }
 
 pub struct OpenRealityApp {
@@ -98,11 +100,21 @@ pub struct OpenRealityApp {
 
     // Tray status
     tray_initialized: bool,
+    update_checker: crate::updater::UpdateChecker,
+    update_prompt: Option<crate::updater::Release>,
+    update_seen: Option<String>,
+    update_job: Option<crate::update_job::UpdateJob>,
+    urgent_update_notice: bool,
+    update_shutdown_started: Option<std::time::Instant>,
+    runtime_switcher: crate::runtime_switch::RuntimeSwitcher,
 }
 
 impl OpenRealityApp {
     pub fn new(settings: StreamerSettings) -> Self {
         let session_handle = Some(crate::session::start_session(settings.clone()));
+        let runtime_choice=settings.openxr_runtime;
+        let arguments:Vec<String>=std::env::args().collect();
+        let failed_update_key=arguments.windows(2).find(|pair|pair[0]=="--update-failed-key").map(|pair|pair[1].clone());
 
         Self {
             settings,
@@ -118,6 +130,13 @@ impl OpenRealityApp {
             save_notification: None,
             session_handle,
             tray_initialized: false,
+            update_checker: crate::updater::UpdateChecker::default(),
+            update_prompt: None,
+            update_seen: failed_update_key,
+            update_job: None,
+            urgent_update_notice: std::env::args().any(|a| a=="--updated-urgent"),
+            update_shutdown_started: None,
+            runtime_switcher: crate::runtime_switch::RuntimeSwitcher::new(runtime_choice),
         }
     }
 
@@ -128,6 +147,15 @@ impl OpenRealityApp {
 
 impl eframe::App for OpenRealityApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(choice)=self.runtime_switcher.poll() {
+            self.settings.openxr_runtime=choice;
+            if let Err(error)=self.settings.save(){self.notify(&format!("Runtime applied, but preference could not be saved: {error}"));}
+        }
+        if self.runtime_switcher.busy(){ctx.request_repaint_after(std::time::Duration::from_millis(100));}
+        self.update_checker.poll();
+        if self.settings.auto_check_updates && self.update_checker.due() { self.update_checker.start(); }
+        if self.update_checker.checking() { ctx.request_repaint_after(std::time::Duration::from_millis(250)); }
+        self.process_updates(ctx);
         // Sync real-time streaming telemetry
         if let Some(ref sh) = self.session_handle {
             self.connected_clients = sh.telemetry.connected_clients.load(Ordering::Relaxed);
@@ -176,7 +204,7 @@ impl eframe::App for OpenRealityApp {
             ui.horizontal(|ui| {
                 // Top bar image logo replacing text completely
                 ui.add(
-                    egui::Image::new(egui::include_image!("../assets/logo.png"))
+                    egui::Image::new(egui::include_image!("../assets/logo-aperture.png"))
                         .max_height(38.0)
                         .fit_to_original_size(0.24),
                 );
@@ -229,6 +257,8 @@ impl eframe::App for OpenRealityApp {
                 ui.selectable_value(&mut self.current_tab, AppTab::VideoOptics, "Video & Optics");
                 ui.selectable_value(&mut self.current_tab, AppTab::AudioInput, "Audio & Input");
                 ui.selectable_value(&mut self.current_tab, AppTab::Displays, "Displays");
+                ui.selectable_value(&mut self.current_tab, AppTab::Updates, "Updates");
+                ui.selectable_value(&mut self.current_tab, AppTab::Settings, "Settings");
             });
             ui.add_space(4.0);
         });
@@ -277,6 +307,8 @@ impl eframe::App for OpenRealityApp {
                 AppTab::AudioInput => self.show_audio_input_tab(ui),
                 AppTab::Displays => self.show_displays_tab(ui),
                 AppTab::VdAccountsModal => self.show_vd_accounts_modal(ui),
+                AppTab::Updates => self.show_updates_tab(ui),
+                AppTab::Settings => self.show_settings_tab(ui),
             });
         });
     }
@@ -407,11 +439,12 @@ impl OpenRealityApp {
             ui.end_row();
 
             ui.label("Virtual Audio Driver:");
-            ui.checkbox(&mut self.settings.use_virtual_audio_driver, "Use Isolated Virtual Audio Endpoint");
+            ui.checkbox(&mut self.settings.use_virtual_audio_driver, "Capture VB-CABLE (CABLE Input)");
             ui.end_row();
         });
 
         ui.add_space(14.0);
+        ui.label("VB-CABLE: route apps to CABLE Input in Windows Sound settings. Save settings and restart Aperture Server after changing routing. Headset Only requires VB-CABLE to avoid speaker playback. Multichannel sources use front left/right.");
         ui.heading("Input Emulation");
         ui.add_space(6.0);
 
@@ -435,14 +468,14 @@ impl OpenRealityApp {
             ui.end_row();
 
             ui.label("Process Priority:");
-            ui.checkbox(&mut self.settings.boost_game_priority, "Boost VR/Game Process Priority via Prism Aperture Service");
+            ui.checkbox(&mut self.settings.boost_game_priority, "Boost VR/Game Process Priority via Aperture Service");
             ui.end_row();
         });
 
         ui.add_space(14.0);
         if ui.button("💾 Save Settings").clicked() {
             let _ = self.settings.save();
-            self.notify("Audio/Input settings saved!");
+            self.notify("Audio/Input settings saved. Restart Aperture Server to apply audio routing.");
         }
     }
 
@@ -461,7 +494,7 @@ impl OpenRealityApp {
             });
 
         ui.add_space(10.0);
-        ui.label("Prism Aperture supports switching between multiple virtual and physical monitors on the fly.");
+        ui.label("Aperture supports switching between multiple virtual and physical monitors on the fly.");
     }
 
     /// (VD Accounts) modal for Virtual Desktop Client Compatibility
@@ -475,7 +508,7 @@ impl OpenRealityApp {
 
         ui.add_space(8.0);
         ui.label(
-            RichText::new("Allows Prism Aperture and third-party Quest client apps to discover and connect to Prism Aperture Server.")
+            RichText::new("Allows Aperture and third-party Quest client apps to discover and connect to Aperture Server.")
                 .color(Color32::from_rgb(200, 200, 220)),
         );
 
@@ -560,3 +593,111 @@ impl OpenRealityApp {
         });
     }
 }
+
+
+
+impl OpenRealityApp {
+    fn show_updates_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Aperture Server Updates");
+        ui.label(format!("Installed version: {}", env!("CARGO_PKG_VERSION")));
+        if ui.checkbox(&mut self.settings.auto_check_updates, "Auto update checks").changed() {
+            if let Err(error) = self.settings.save() { self.notify(&format!("Could not save update preference: {error}")); }
+        }
+        ui.label("Check at startup and every six hours when enabled. Stable releases only.");
+        if ui.add_enabled(!self.update_checker.checking(), egui::Button::new("Check for updates")).clicked() {
+            self.update_seen=None;
+            self.settings.skipped_update_version=None;
+            self.update_checker.start();
+        }
+        ui.label(&self.update_checker.message);
+        if let Some(release) = &self.update_checker.release {
+            if let Some(url) = &release.installer_url { ui.hyperlink_to("Download Aperture installer", url); }
+            ui.hyperlink_to("Release notes", &release.page_url);
+        }
+        ui.hyperlink_to("All Aperture releases", "https://github.com/Nebulynx-Prism/Aperture/releases");
+        ui.label("Normal ZIP updates ask before installation. Urgent ZIP updates install automatically when detected; Windows administrator approval may still be required.");
+    }
+}
+
+impl OpenRealityApp {
+    fn show_settings_tab(&mut self, ui:&mut egui::Ui) {
+        ui.heading("Server Settings");
+        ui.label("Diagnostics");
+        if ui.checkbox(&mut self.settings.show_console,"Show diagnostic console window").changed(){
+            match crate::console::set_visible(self.settings.show_console) {
+                Ok(())=>if let Err(error)=self.settings.save(){self.notify(&format!("Could not save console preference: {error}"));},
+                Err(error)=>{self.settings.show_console=!self.settings.show_console;self.notify(&format!("Console unavailable: {error}"));}
+            }
+        }
+        ui.label("Off by default. Use this toggle to close the console without closing Aperture.");
+        ui.add_space(16.0);
+        ui.heading("OpenXR Runtime");
+        ui.label("Close VR apps and SteamVR before switching. Changes apply to newly launched OpenXR applications.");
+        egui::ComboBox::from_id_salt("openxr_runtime_choice").selected_text(match self.runtime_switcher.choice {
+            OpenXRRuntime::SteamVR=>"SteamVR OpenXR (SteamVR)",
+            OpenXRRuntime::ApertureXR=>"Aperture OpenXR (ApertureXR)",
+            OpenXRRuntime::Automatic=>"Current system runtime",
+        }).show_ui(ui,|ui|{
+            ui.selectable_value(&mut self.runtime_switcher.choice,OpenXRRuntime::SteamVR,"SteamVR OpenXR (SteamVR)");
+            ui.selectable_value(&mut self.runtime_switcher.choice,OpenXRRuntime::ApertureXR,"Aperture OpenXR (ApertureXR)");
+        });
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!self.runtime_switcher.busy() && self.runtime_switcher.choice!=OpenXRRuntime::Automatic,egui::Button::new("Apply runtime")).clicked(){self.runtime_switcher.apply(false);}
+            if ui.add_enabled(!self.runtime_switcher.busy(),egui::Button::new("Restore previous runtime")).clicked(){self.runtime_switcher.apply(true);}
+        });
+        ui.label(&self.runtime_switcher.message);
+        ui.label("Requires Aperture Service. ApertureXR is experimental and supports OpenXR apps; OpenVR apps require SteamVR. Never run both compositor backends together.");
+    }
+}
+
+impl OpenRealityApp {
+    fn begin_update(&mut self, release: &crate::updater::Release) {
+        match crate::update_job::UpdateJob::start(release) {
+            Ok(job)=>{self.update_job=Some(job);self.update_prompt=None;self.update_checker.message="Preparing update... Aperture stays open until verification finishes.".into();}
+            Err(error)=>self.update_checker.message=format!("Could not start updater: {error:#}"),
+        }
+    }
+    fn process_updates(&mut self,ctx:&egui::Context){
+        if let Some(release)=self.update_checker.release.clone(){
+            let key=format!("{}:{}",release.version,release.urgent);
+            if release.package_url.is_some() && self.update_seen.as_ref()!=Some(&key) && self.update_job.is_none(){
+                self.update_seen=Some(key);
+                if release.urgent {self.begin_update(&release);}
+                else if self.settings.skipped_update_version.as_ref()!=Some(&release.version){self.update_prompt=Some(release);}
+            }
+        }
+        if let Some(job)=self.update_job.as_mut(){
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            match job.poll(){
+                crate::update_job::Progress::Ready=>{
+                    if let Some(started)=self.update_shutdown_started {
+                        if started.elapsed()>=std::time::Duration::from_secs(1){ctx.send_viewport_cmd(egui::ViewportCommand::Close);}
+                    } else {
+                        if let Some(session)=&self.session_handle{session.stop();}
+                        self.update_shutdown_started=Some(std::time::Instant::now());
+                    }
+                }
+                crate::update_job::Progress::Failed(error)=>{self.update_checker.message=format!("Update failed: {error}");self.update_job=None;}
+                crate::update_job::Progress::Waiting=>{}
+            }
+        }
+        if let Some(release)=self.update_prompt.clone(){
+            egui::Window::new("Aperture Update").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).show(ctx,|ui|{
+                ui.label(format!("v{} is available. View on GitHub for the changelog. Wanna update?",release.version));
+                ui.hyperlink_to("View on GitHub",&release.page_url);
+                ui.horizontal(|ui|{
+                    if ui.button("Update").clicked(){self.begin_update(&release);}
+                    if ui.button("Skip").clicked(){self.settings.skipped_update_version=Some(release.version.clone());let _=self.settings.save();self.update_prompt=None;}
+                });
+            });
+        }
+        if self.urgent_update_notice{
+            egui::Window::new("Aperture updated").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).show(ctx,|ui|{
+                ui.label("An urgent update was pushed and your software was auto-updated due to the urgent update.");
+                if ui.button("OK").clicked(){self.urgent_update_notice=false;}
+            });
+        }
+    }
+}
+
+

@@ -1,0 +1,14 @@
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{32DDF98D-E4AE-4AC2-952B-72DB9D04D747}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType Condition="'$(NativeKind)'==''">DynamicLibrary</ConfigurationType><ConfigurationType Condition="'$(NativeKind)'!=''">$(NativeKind)</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v145</PlatformToolset></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><TargetName>driver_aperture</TargetName><OutDir>$(MSBuildThisFileDirectory)..\driver\bin\win64\</OutDir><IntDir>$(MSBuildThisFileDirectory)..\target\abi\</IntDir><NativeSource Condition="'$(NativeSource)'==''">$(MSBuildThisFileDirectory)openvr_shim.cpp</NativeSource></PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile><WarningLevel>Level4</WarningLevel><Optimization>MaxSpeed</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><LanguageStandard>stdcpp17</LanguageStandard><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <Link><AdditionalLibraryDirectories>$(MSBuildThisFileDirectory)..\target\x86_64-pc-windows-msvc\release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>aperture_driver.lib;d3d11.lib;dxgi.lib;ole32.lib;oleaut32.lib;propsys.lib;uuid.lib;ntdll.lib;advapi32.lib;userenv.lib;ws2_32.lib;bcrypt.lib;runtimeobject.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="$(NativeSource)" /></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

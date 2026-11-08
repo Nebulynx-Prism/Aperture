@@ -39,7 +39,7 @@ bool InputManager::init(XrInstance instance, XrSession session) {
 
     XrActionSetCreateInfo setInfo{XR_TYPE_ACTION_SET_CREATE_INFO};
     std::strncpy(setInfo.actionSetName, "desktop_input", XR_MAX_ACTION_SET_NAME_SIZE);
-    std::strncpy(setInfo.localizedActionSetName, "Prism Aperture Controller Input", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    std::strncpy(setInfo.localizedActionSetName, "Aperture Controller Input", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
     setInfo.priority = 0;
     XrResult res = xrCreateActionSet(m_instance, &setInfo, &m_actionSet);
     if (XR_FAILED(res)) {
@@ -207,6 +207,8 @@ void InputManager::update(XrTime predictedTime, XrSpace localSpace) {
 
         // Query Grip Pose
         XrSpaceLocation gripLocation{XR_TYPE_SPACE_LOCATION};
+        m_gripVelocity[hand]={XR_TYPE_SPACE_VELOCITY};
+        gripLocation.next=&m_gripVelocity[hand];
         aimInfo.action = m_gripPoseAction;
         XrActionStatePose gripPoseState{XR_TYPE_ACTION_STATE_POSE};
         m_gripValid[hand] = xrGetActionStatePose(m_session, &aimInfo, &gripPoseState) == XR_SUCCESS

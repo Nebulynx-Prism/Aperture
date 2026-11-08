@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cmath>
 #include <deque>
+#include <array>
 #include <openxr/openxr.h>
 #include "messages.hpp"
 
@@ -109,6 +110,7 @@ public:
     bool isControllerActive(int hand) const { return m_controllerActive[hand]; }
     XrPosef getAimPose(int hand) const { return m_aimPoses[hand]; }
     XrPosef getGripPose(int hand) const { return m_gripPoses[hand]; }
+    XrSpaceVelocity getGripVelocity(int hand) const { return m_gripVelocity[hand]; }
     float getTrigger(int hand) const { return m_triggerValues[hand]; }
     float getGrip(int hand) const { return m_gripValues[hand]; }
     bool isGripPoseValid(int hand) const { return m_gripValid[hand]; }
@@ -150,6 +152,7 @@ private:
     bool m_controllerActive[2]{false, false};
     XrPosef m_aimPoses[2]{};
     XrPosef m_gripPoses[2]{};
+    std::array<XrSpaceVelocity,2> m_gripVelocity{{{XR_TYPE_SPACE_VELOCITY},{XR_TYPE_SPACE_VELOCITY}}};
     float m_triggerValues[2]{0.0f, 0.0f};
     bool m_triggerActive[2]{false, false};
     float m_gripValues[2]{0.0f, 0.0f};

@@ -9,6 +9,7 @@
 //! - Virtual audio endpoint and hardware acceleration optimization
 //! - Service installation, uninstallation, and lifecycle management
 
+mod runtime_registry;
 use anyhow::{Context, Result};
 
 use std::ptr;
@@ -39,7 +40,7 @@ use windows::Win32::System::Threading::{
 };
 
 pub const SERVICE_NAME: &str = "PrismApertureService";
-pub const SERVICE_DISPLAY_NAME: &str = "Prism Aperture Service";
+pub const SERVICE_DISPLAY_NAME: &str = "Aperture Service";
 pub const PIPE_NAME: &str = r"\\.\pipe\PrismApertureService";
 
 static IS_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -62,6 +63,7 @@ fn main() -> Result<()> {
         "--start" => start_service_cli(),
         "--stop" => stop_service_cli(),
         "--run" | "-r" => run_interactive(),
+        "--restore-owned-runtime" => runtime_registry::restore_owned(),
         "--service" => run_as_service(),
         other => anyhow::bail!("Unknown service argument: {other}"),
     }
@@ -287,6 +289,7 @@ fn process_command(json_str: &str) -> String {
                 Err(anyhow::anyhow!("Missing path argument"))
             }
         }
+        "restore_openxr_runtime" => runtime_registry::restore(),
         "restart_ovr_service" => restart_ovr_service(),
         "disable_hags" => disable_hags(),
         other => Err(anyhow::anyhow!("Unknown command: {other}")),
@@ -349,54 +352,7 @@ fn disable_process_throttling(pid: u32) -> Result<String> {
 }
 
 fn set_openxr_runtime(manifest_path: &str) -> Result<String> {
-    unsafe {
-        let key_path = HSTRING::from(r"SOFTWARE\Khronos\OpenXR\1");
-        let val_name = HSTRING::from("ActiveRuntime");
-        let mut hkey = HKEY::default();
-
-        let res = RegCreateKeyExW(
-            HKEY_LOCAL_MACHINE,
-            PCWSTR(key_path.as_ptr()),
-            0,
-            None,
-            REG_OPTION_NON_VOLATILE,
-            KEY_ALL_ACCESS,
-            None,
-            &mut hkey,
-            None,
-        );
-
-        if res.is_err() {
-            return Err(anyhow::anyhow!("Failed to open OpenXR registry key"));
-        }
-
-        let val_data: Vec<u16> = manifest_path
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let set_res = RegSetValueExW(
-            hkey,
-            PCWSTR(val_name.as_ptr()),
-            0,
-            REG_SZ,
-            Some(std::slice::from_raw_parts(
-                val_data.as_ptr() as *const u8,
-                val_data.len() * 2,
-            )),
-        );
-
-        let _ = RegCloseKey(hkey);
-
-        if set_res.is_ok() {
-            info!("Registered active OpenXR runtime: {manifest_path}");
-            Ok(format!("OpenXR runtime set to {manifest_path}"))
-        } else {
-            Err(anyhow::anyhow!(
-                "Failed to write OpenXR ActiveRuntime value"
-            ))
-        }
-    }
+    runtime_registry::activate(manifest_path)
 }
 
 fn restart_ovr_service() -> Result<String> {
@@ -608,3 +564,6 @@ mod tests {
         }
     }
 }
+
+
+

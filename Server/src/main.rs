@@ -1,3 +1,4 @@
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 //! Prism Aperture Server — High-Performance VR Desktop Streamer
 //!
 //! Captures the Windows desktop, encodes video with hardware acceleration,
@@ -6,6 +7,8 @@
 mod audio;
 mod capture;
 mod cursor;
+mod console;
+mod runtime_switch;
 mod driver_bridge;
 mod encoder;
 mod input;
@@ -14,11 +17,18 @@ mod service_client;
 mod session;
 mod settings;
 mod ui;
+mod updater;
+mod update_job;
 
 use anyhow::Result;
 use tracing_subscriber::{fmt, EnvFilter};
 
 fn main() -> Result<()> {
+    let settings = settings::StreamerSettings::load_or_default();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cli = args.iter().any(|arg| arg == "--headless" || arg == "--configure-pcvr");
+    console::initialize(settings.show_console || args.iter().any(|arg| arg == "--console"), cli)?;
+    runtime_switch::initialize();
     // Initialize logging
     fmt()
         .with_env_filter(
@@ -28,12 +38,9 @@ fn main() -> Result<()> {
 
     tracing::info!("Prism Aperture Server v{}", env!("CARGO_PKG_VERSION"));
 
-    // Load settings
-    let settings = settings::StreamerSettings::load_or_default();
     tracing::info!("Settings loaded: {:?}", settings.preferred_codec);
 
     // Console mode also provides a bounded smoke-test path without opening UI.
-    let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--configure-pcvr") {
         let manifest = driver_bridge::configure_runtime()?;
         println!(
@@ -66,3 +73,7 @@ fn main() -> Result<()> {
     // Launch the UI (which orchestrates everything)
     ui::run(settings)
 }
+
+
+
+

@@ -2,6 +2,8 @@
 
 #define XR_USE_PLATFORM_ANDROID
 #define XR_USE_GRAPHICS_API_OPENGL_ES
+#define XR_USE_TIMESPEC
+#include <time.h>
 
 #include <jni.h>
 #include <EGL/egl.h>
@@ -15,6 +17,8 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include <cstdint>
+#include <array>
+#include <algorithm>
 #include <vector>
 #include <memory>
 #include "messages.hpp"
@@ -22,6 +26,7 @@
 #include "vr_gui.hpp"
 #include "input_manager.hpp"
 #include "video_frame_pose.hpp"
+#include "motion_packet.hpp"
 
 namespace openreality {
 
@@ -74,7 +79,11 @@ public:
 
     // Tracking
     TrackingPacket sampleTracking(const InputManager& input) const;
+    MotionPacket sampleMotion(const InputManager& input,uint64_t sampleUs) const;
     void setVideoPose(const VideoFramePose& pose) { m_videoPose=pose; }
+    void setVideoTextureTransform(const float* transform) {
+        if (transform) std::copy(transform, transform + m_videoTextureTransform.size(), m_videoTextureTransform.begin());
+    }
     XrPosef getHeadPose() const { return m_headPose; }
     XrSpace getLocalSpace() const { return m_localSpace; }
     XrSession getSession() const { return m_session; }
@@ -140,8 +149,11 @@ private:
     XrFrameState m_frameState{XR_TYPE_FRAME_STATE};
     XrPosef m_headPose{};
     bool m_headValid{false};
+    XrSpaceVelocity m_headVelocity{XR_TYPE_SPACE_VELOCITY};
+    PFN_xrConvertTimeToTimespecTimeKHR m_convertTime{nullptr};
     bool m_viewsValid{false};
     VideoFramePose m_videoPose;
+    std::array<float, 16> m_videoTextureTransform{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
     // Extension function pointers
     PFN_xrGetDisplayRefreshRateFB pfn_xrGetDisplayRefreshRateFB{nullptr};

@@ -288,6 +288,10 @@ bool NetworkClient::sendTcpMessage(MessageType type, const std::vector<uint8_t>&
     NetMessage netMsg;
     netMsg.message_type = static_cast<uint32_t>(type);
     netMsg.payload = payload;
+    if(netMsg.message_type==111 && netMsg.payload.size()==24) {
+        const auto sent=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        for(int i=0;i<8;++i)netMsg.payload[16+i]=static_cast<uint8_t>(sent>>(i*8));
+    }
     netMsg.timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
     netMsg.sequence = m_sendSequence++;
@@ -355,13 +359,14 @@ void NetworkClient::sendControllerInput(const ControllerInput& controller) {
     sendTcpMessage(MessageType::INPUT_EVENT, payload);
 }
 
-void NetworkClient::sendTrackingPacket(const TrackingPacket& packet) {
+void NetworkClient::sendTrackingPacket(const TrackingPacket& packet,const MotionPacket* motion) {
     if(!isConnected()) return;
     auto payload=packet.serialize();
+    if(motion&&motion->timingValid){auto extension=motion->serialize();payload.insert(payload.end(),extension.begin(),extension.end());}
     {
         std::lock_guard<std::mutex> lock(m_trackingMutex);
         // Preserve a short-menu event if a newer pose replaces an unsent sample.
-        if(m_pendingTracking.size()==192) payload[144]|=m_pendingTracking[144]&4u;
+        if(m_pendingTracking.size()>=192) payload[144]|=m_pendingTracking[144]&4u;
         m_pendingTracking=std::move(payload);
     }
     m_trackingWake.notify_one();
@@ -378,7 +383,13 @@ void NetworkClient::runTrackingLoop() {
         }
         // TCP sending never stalls xrWaitFrame/rendering; under backpressure
         // retain only the freshest next pose, not a growing latency queue.
-        if(!sendTcpMessage(MessageType::TRACKING,payload)) break;
+        if(payload.size()<192)continue;
+        std::vector<uint8_t> tracking(payload.begin(),payload.begin()+192);
+        if(!sendTcpMessage(MessageType::TRACKING,tracking)) break;
+        if(payload.size()==192+sizeof(MotionPacket)) {
+            std::vector<uint8_t> motion(payload.begin()+192,payload.end());
+            if(!sendTcpMessage(static_cast<MessageType>(109),motion)) break;
+        }
     }
 }
 void NetworkClient::showDesktop() { sendTcpMessage(MessageType::SHOW_DESKTOP, {1}); }
@@ -440,6 +451,11 @@ void NetworkClient::runTcpLoop() {
                 m_streamConfigured = true;
                 if (m_onVrModeChanged) m_onVrModeChanged(m_isStereoStream.load());
                 LOGI("Stream %ux%u SBS=%d generation=%u", config.width, config.height, int(m_isStereoStream.load()), config.generation);
+            } else if (msg.message_type == 110 && msg.payload.size()==8) {
+                const auto received=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                auto reply=msg.payload;reply.resize(24,0);
+                for(int i=0;i<8;++i)reply[8+i]=static_cast<uint8_t>(received>>(i*8));
+                if(!sendTcpMessage(static_cast<MessageType>(111),reply))break;
             } else if (msg.message_type == 104) {
                 LOGW("Server status: %.*s", static_cast<int>(msg.payload.size()),
                      reinterpret_cast<const char*>(msg.payload.data()));

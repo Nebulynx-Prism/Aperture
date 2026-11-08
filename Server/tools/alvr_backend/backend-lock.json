@@ -1,0 +1,11 @@
+{
+  "version": "21.0.0-dev14+nightly.2026.11.07",
+  "source_commit": "e8ca92b15d7c93765f828ca245f26de678c7f154",
+  "source_repository": "https://github.com/alvr-org/ALVR",
+  "release_base": "https://github.com/alvr-org/ALVR-nightly/releases/download/v21.0.0-dev14%2Bnightly.2026.11.07/",
+  "artifacts": {
+    "alvr_client_android.apk": "D3749AE5F78817B999477EF3F419E706A3F4489788108F27F2E9127F71893BBA",
+    "alvr_streamer_windows.zip": "8F74780BAE7CF50E4DC2C807579DE81014CD858432ED9A08325415FFAFEFDE15",
+    "alvr_client_core.zip": "32D9DBA6F064B47F818EFC5ABAEADC47A211BAB5A393180AFF54F1D04DB4098F"
+  }
+}

@@ -353,6 +353,27 @@ impl DriverBridge {
         info!("Quest headset type {hmd_type} with OpenXR eye target {eye_width}x{eye_height} published to driver");
         Ok(())
     }
+    pub fn update_motion(&self,payload:&[u8],estimate:Option<aperture_wire::clock::Estimate>)->Result<()> {
+        let motion=aperture_wire::Motion::decode(payload).context("Invalid Aperture motion extension")?;
+        let now=aperture_wire::clock::host_now_ns();
+        let aligned=motion.sample_us.checked_mul(1000).and_then(|time|time.checked_add(motion.target_lead_ns as u64))
+            .and_then(|target|estimate.and_then(|estimate|estimate.align(target,now).map(|target_host_ns|aperture_wire::AlignedMotion{
+                magic:0x544d5641,version:1,sample_us:motion.sample_us,target_host_ns,written_host_ns:now,rtt_ns:estimate.rtt_ns
+            }))).unwrap_or_default();
+        self.mapping.as_ref().context("Prism IPC unavailable")?.with(0,|h,pixels| {
+            // Type 105 owns the pose. Never attach velocity to a different pose
+            // if a newer tracking packet has superseded this extension.
+            if h.tracking.sample_time_us==motion.sample_us {
+                unsafe {
+                    let slot=pixels.sub(PIXEL_OFFSET-aperture_wire::MOTION_OFFSET);
+                    std::ptr::copy_nonoverlapping(motion.encode().as_ptr(),slot,aperture_wire::MOTION_BYTES);
+                    let alignment=pixels.sub(PIXEL_OFFSET-aperture_wire::ALIGNED_OFFSET);
+                    std::ptr::copy_nonoverlapping(aligned.encode().as_ptr(),alignment,aperture_wire::ALIGNED_BYTES);
+                }
+            }
+        }).context("Motion metadata IPC busy")?;
+        Ok(())
+    }
     pub fn status(&self) -> DriverStatus {
         let Some(m) = &self.mapping else {
             return DriverStatus::Unavailable;
@@ -380,30 +401,24 @@ impl DriverBridge {
         self.requested.load(Ordering::SeqCst)
     }
     pub fn read_frame(&self, last: u64) -> Option<VrFrame> {
+        // Keep the image copy under the shared mutex. Reading it optimistically
+        // outside the lock reduced contention but could race the driver's next
+        // pixel publish and show a visibly torn SBS frame.
         self.mapping.as_ref()?.with(3, |h, pixels| {
             h.server_heartbeat_ms = tick();
-            if h.driver_ready == 0
-                || h.frame_sequence == 0
-                || h.frame_sequence == last
+            if h.driver_ready == 0 || h.frame_sequence == 0 || h.frame_sequence == last
                 || tick().saturating_sub(h.frame_time_ms) > 1000
-            {
-                return None;
-            }
-            let (w, hh) = (h.frame_width, h.frame_height);
-            if w == 0
-                || hh == 0
-                || w > MAX_WIDTH
-                || hh > MAX_HEIGHT
-                || h.frame_stride != w * 4
-                || h.frame_format != 0
-            {
-                return None;
-            }
+            { return None; }
+            let (width, height) = (h.frame_width, h.frame_height);
+            if width == 0 || height == 0 || width > MAX_WIDTH || height > MAX_HEIGHT
+                || h.frame_stride != width * 4 || h.frame_format != 0
+            { return None; }
+            let sequence = h.frame_sequence;
             let data = unsafe {
-                std::slice::from_raw_parts(pixels, w as usize * hh as usize * 4).to_vec()
+                std::slice::from_raw_parts(pixels, width as usize * height as usize * 4).to_vec()
             };
-            let pose=unsafe { pixels.sub(PIXEL_OFFSET-FRAME_POSE_OFFSET).cast::<SharedFramePose>().read_unaligned() };
-            let pose=if pose.magic==FRAME_POSE_MAGIC && pose.version==1 && pose.sequence==h.frame_sequence && pose.head.valid==1 {
+            let pose = unsafe { pixels.sub(PIXEL_OFFSET-FRAME_POSE_OFFSET).cast::<SharedFramePose>().read_unaligned() };
+            let pose=if pose.magic==FRAME_POSE_MAGIC && pose.version==1 && pose.sequence==sequence && pose.head.valid==1 {
                 let norm:f32=pose.head.orientation.iter().map(|v|v*v).sum();
                 let f=pose.fov;
                 if norm.is_finite() && (0.25..4.0).contains(&norm) && f.iter().all(|v|v.is_finite()&&v.abs()<1.57)
@@ -411,13 +426,7 @@ impl DriverBridge {
                     Some(FramePose { orientation:pose.head.orientation.map(|v|v/norm.sqrt()), fov:f, sample_time_us:pose.sample_time_us })
                 } else { None }
             } else { None };
-            Some(VrFrame {
-                data,
-                width: w,
-                height: hh,
-                sequence: h.frame_sequence,
-                pose,
-            })
+            Some(VrFrame { data, width, height, sequence, pose })
         })?
     }
     pub fn update_frame(&self, _frame: u32) {}
@@ -446,57 +455,36 @@ pub fn steamvr_root() -> Result<PathBuf> {
     bail!("SteamVR runtime not found; set PRISM_STEAMVR_PATH")
 }
 pub fn driver_root() -> Result<PathBuf> {
-    let adjacent = std::env::current_exe()?
-        .parent()
-        .context("No executable directory")?
-        .join("prism_openvr_driver");
-    for p in [
-        adjacent,
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/prism_openvr_driver/driver"),
-    ] {
-        if p.join("bin/win64/driver_prism_aperture.dll").is_file()
-            && p.join("driver.vrdrivermanifest").is_file()
-        {
-            return Ok(p);
-        }
+    let adjacent=std::env::current_exe()?.parent().context("No executable directory")?.join("aperture_driver");
+    for path in [adjacent,Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/aperture_driver/driver")] {
+        if path.join("bin/win64/driver_aperture.dll").is_file() && path.join("driver.vrdrivermanifest").is_file(){return Ok(path);}
     }
-    bail!("Prism driver not built; run tools/prism_openvr_driver/build_driver.ps1")
+    bail!("Aperture Rust driver is not built; run tools/aperture_driver/build.ps1")
 }
 pub fn configure_runtime() -> Result<PathBuf> {
     use std::os::windows::process::CommandExt;
     let runtime = steamvr_root()?;
     let driver = driver_root()?;
-    let settings = runtime
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .context("Invalid SteamVR directory")?
-        .join("config/steamvr.vrsettings");
+    let settings = runtime.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+        .context("Invalid SteamVR directory")?.join("config/steamvr.vrsettings");
     if settings.is_file() {
         let bytes = std::fs::read(&settings)?;
         let mut v: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if v["steamvr"]["forcedDriver"].as_str() == Some("null") {
-            let backup = settings.with_extension(format!(
-                "vrsettings.prism-backup-{}",
-                chrono::Utc::now().format("%Y%m%d%H%M%S")
-            ));
+        if v["steamvr"]["forcedDriver"].as_str() != Some("aperture") {
+            let backup = settings.with_extension(format!("vrsettings.prism-backup-{}",chrono::Utc::now().format("%Y%m%d%H%M%S")));
             std::fs::write(&backup, &bytes)?;
-            v["steamvr"]["forcedDriver"] = serde_json::Value::String("prism_aperture".into());
+            v["steamvr"]["forcedDriver"] = serde_json::Value::String("aperture".into());
+            v["driver_aperture"]["enable"]=serde_json::Value::Bool(true);
+            v["driver_aperture"]["blocked_by_safe_mode"]=serde_json::Value::Bool(false);
+            v["driver_prism_aperture"]["enable"]=serde_json::Value::Bool(false);
             v["driver_null"]["enable"] = serde_json::Value::Bool(false);
             std::fs::write(&settings, serde_json::to_vec_pretty(&v)?)?;
-            info!("Replaced legacy null driver; backup {}", backup.display());
+            info!("Selected Aperture Rust driver; backup {}", backup.display());
         }
     }
     let out = std::process::Command::new(runtime.join("bin/win64/vrpathreg.exe"))
-        .arg("adddriver")
-        .arg(&driver)
-        .creation_flags(0x08000000)
-        .output()?;
-    ensure!(
-        out.status.success(),
-        "OpenVR registration failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+        .arg("adddriver").arg(&driver).creation_flags(0x08000000).output()?;
+    ensure!(out.status.success(),"OpenVR registration failed: {}",String::from_utf8_lossy(&out.stderr));
     info!("Registered Prism driver {}", driver.display());
     Ok(runtime.join("steamxr_win64.json"))
 }

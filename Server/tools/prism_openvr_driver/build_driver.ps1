@@ -12,6 +12,13 @@ $toolset=(Get-ChildItem "$installation/MSBuild/Microsoft/VC/*/Platforms/x64/Plat
 if(!$toolset) { throw 'No installed MSVC platform toolset found.' }
 $out=if($OutputDirectory){[IO.Path]::GetFullPath($OutputDirectory)}else{Join-Path $PSScriptRoot 'driver/bin/win64'}
 New-Item -ItemType Directory -Force $out | Out-Null
+$env:CARGO_TARGET_DIR=Join-Path $PSScriptRoot 'rust_core/target'
+$previousErrorPreference = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& cargo build --manifest-path (Join-Path $PSScriptRoot 'rust_core/Cargo.toml') --release --target x86_64-pc-windows-msvc
+$cargoExitCode = $LASTEXITCODE
+$ErrorActionPreference = $previousErrorPreference
+if($cargoExitCode -ne 0) { throw 'Rust OpenVR core compilation failed (MSVC Rust target required).' }
 $library=Join-Path $out 'driver_prism_aperture.dll'
 $backup=Join-Path $PSScriptRoot 'target/driver_before_msvc.dll'
 New-Item -ItemType Directory -Force (Split-Path $backup -Parent) | Out-Null

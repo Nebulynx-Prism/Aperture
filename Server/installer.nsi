@@ -1,13 +1,16 @@
 ; ==============================================================================
-; Prism Aperture Server & Service Installer Script (NSIS)
+; Aperture Server & Service Installer Script (NSIS)
 ; ==============================================================================
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
+!include "LogicLib.nsh"
+!include "x64.nsh"
+SetCompressor /SOLID lzma
 
 ; General Configuration
-Name "Prism Aperture Server"
-OutFile "target\release\PrismAperture-Setup.exe"
+Name "Aperture Server"
+OutFile "target\release\Aperture-Setup.exe"
 InstallDir "$PROGRAMFILES64\NebulynxGames\PrismSuite\Aperture"
 InstallDirRegKey HKLM "Software\NebulynxGames\PrismSuite\Aperture" "InstallDir"
 RequestExecutionLevel admin
@@ -23,17 +26,18 @@ Unicode True
 !define MUI_UNWELCOMEFINISHPAGE_BITMAP "assets\prismbar.bmp"
 
 ; Welcome Page
-!define MUI_WELCOMEPAGE_TITLE "Welcome to Prism Aperture Server Setup"
-!define MUI_WELCOMEPAGE_TEXT "This wizard will install Prism Aperture Server and Prism Aperture Service on your computer.$\r$\n$\r$\nPrism Aperture provides high-performance, ultra-low-latency VR desktop streaming for Meta Quest 2, Quest 3, and Quest 3S.$\r$\n$\r$\nClick Next to continue."
+!define MUI_WELCOMEPAGE_TITLE "Welcome to Aperture Server Setup"
+!define MUI_WELCOMEPAGE_TEXT "This wizard will install Aperture Server and Aperture Service on your computer.$\r$\n$\r$\nAperture provides high-performance, ultra-low-latency VR desktop streaming for Meta Quest 2, Quest 3, and Quest 3S.$\r$\n$\r$\nClick Next to continue."
 !insertmacro MUI_PAGE_WELCOME
 
 ; License & Directory Pages
+!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 
 ; Finish Page
 !define MUI_FINISHPAGE_RUN "$INSTDIR\prism-aperture-server.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Launch Prism Aperture Server"
+!define MUI_FINISHPAGE_RUN_TEXT "Launch Aperture Server"
 !insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller Pages
@@ -47,10 +51,10 @@ Unicode True
 
 ; Version Information
 VIProductVersion "0.1.0.0"
-VIAddVersionKey "ProductName" "Prism Aperture Server"
+VIAddVersionKey "ProductName" "Aperture Server"
 VIAddVersionKey "CompanyName" "Nebulynx Game Studios"
 VIAddVersionKey "LegalCopyright" "Nebulynx Game Studios"
-VIAddVersionKey "FileDescription" "Prism Aperture Server & Service Installer"
+VIAddVersionKey "FileDescription" "Aperture Server & Service Installer"
 VIAddVersionKey "FileVersion" "0.1.0.0"
 VIAddVersionKey "ProductVersion" "0.1.0.0"
 
@@ -58,7 +62,7 @@ VIAddVersionKey "ProductVersion" "0.1.0.0"
 ; Installer Sections
 ; ==============================================================================
 
-Section "Prism Aperture Core" SecCore
+Section "Aperture Core" SecCore
     SectionIn RO
 
     ; Kill any running instances before overwriting
@@ -72,6 +76,14 @@ Section "Prism Aperture Core" SecCore
     ; Install Binaries
     File "target\release\prism-aperture-server.exe"
     File "target\release\prism-aperture-service.exe"
+    File "target\release\Aperture-Updater.exe"
+
+
+    ; Portable encoder; no dependency on another installed streaming application.
+    File "target\installer-payload\ffmpeg.exe"
+    SetOutPath "$INSTDIR\licenses\ffmpeg"
+    File /r "target\installer-payload\ffmpeg-license\*.*"
+    SetOutPath "$INSTDIR"
 
     ; Install Assets
     SetOutPath "$INSTDIR\assets"
@@ -81,7 +93,7 @@ Section "Prism Aperture Core" SecCore
     File "assets\aperture.png"
     File "assets\installer.ico"
     File "assets\installer.png"
-    File "assets\logo.png"
+    File /oname=logo.png "assets\logo-aperture.png"
     File "assets\sidebar.png"
     File "assets\sidebar.bmp"
     File "assets\prismbar.png"
@@ -89,20 +101,42 @@ Section "Prism Aperture Core" SecCore
 
     SetOutPath "$INSTDIR"
 
-    ; No compatible Prism PCVR backend is shipped. Do not install/register the ALVR bundle.
+    ; Aperture-owned Rust PCVR driver. No ALVR/VDXR implementation is packaged.
+    SetOutPath "$INSTDIR\aperture_driver"
+    File /r /x *.pdb /x *.lib /x *.exp /x *.ilk "tools\aperture_driver\driver\*.*"
+    SetOutPath "$INSTDIR"
 
-    ; Install and start the Prism Aperture Service
-    DetailPrint "Installing Prism Aperture Service..."
-    ExecWait '"$INSTDIR\prism-aperture-service.exe" --install'
+    SetOutPath "$INSTDIR\tools"
+    File "tools\register_driver.ps1"
+    File "tools\install_vbcable.ps1"
+    SetOutPath "$INSTDIR"
+    DetailPrint "Registering the Aperture SteamVR driver..."
+    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\tools\register_driver.ps1" -DriverPath "$INSTDIR\aperture_driver"' $0
+    ${If} $0 != 0
+        MessageBox MB_OK|MB_ICONEXCLAMATION "Driver files installed. SteamVR registration was unavailable. Install SteamVR, then use the Register Aperture Driver shortcut." /SD IDOK
+    ${EndIf}
 
-    DetailPrint "Starting Prism Aperture Service..."
-    ExecWait '"$INSTDIR\prism-aperture-service.exe" --start'
+    ; Install and start the Aperture Service
+    DetailPrint "Installing Aperture Service..."
+    ExecWait '"$INSTDIR\prism-aperture-service.exe" --install' $0
+    ${If} $0 != 0
+        MessageBox MB_OK|MB_ICONSTOP "Aperture Service installation failed (exit $0)." /SD IDOK
+        SetErrorLevel 1
+        Abort
+    ${EndIf}
+
+    ExecWait 'sc.exe config PrismApertureService DisplayName= "Aperture Service"'
+    DetailPrint "Starting Aperture Service..."
+    ExecWait '"$INSTDIR\prism-aperture-service.exe" --start' $0
+    ${If} $0 != 0
+        MessageBox MB_OK|MB_ICONEXCLAMATION "Aperture Service did not start (exit $0). Check Windows Services." /SD IDOK
+    ${EndIf}
 
     ; Configure Windows Firewall rules
     DetailPrint "Configuring Windows Firewall rules..."
-    ExecWait 'netsh advfirewall firewall add rule name="Prism Aperture Server" dir=in action=allow program="$INSTDIR\prism-aperture-server.exe" enable=yes'
-    ExecWait 'netsh advfirewall firewall add rule name="Prism Aperture Server TCP" dir=in action=allow protocol=TCP localport=38810 enable=yes'
-    ExecWait 'netsh advfirewall firewall add rule name="Prism Aperture Server UDP" dir=in action=allow protocol=UDP localport=38810 enable=yes'
+    ExecWait 'netsh advfirewall firewall add rule name="Aperture Server" dir=in action=allow program="$INSTDIR\prism-aperture-server.exe" enable=yes'
+    ExecWait 'netsh advfirewall firewall add rule name="Aperture Server TCP" dir=in action=allow protocol=TCP localport=38810 enable=yes'
+    ExecWait 'netsh advfirewall firewall add rule name="Aperture Server UDP" dir=in action=allow protocol=UDP localport=38810 enable=yes'
 
     ; Write installation path to registry
     WriteRegStr HKLM "Software\NebulynxGames\PrismSuite\Aperture" "InstallDir" "$INSTDIR"
@@ -112,7 +146,7 @@ Section "Prism Aperture Core" SecCore
     WriteUninstaller "$INSTDIR\Uninstall.exe"
 
     ; Write Add/Remove Programs registry keys
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "DisplayName" "Prism Aperture Server"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "DisplayName" "Aperture Server"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "DisplayIcon" "$INSTDIR\assets\icon.ico"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "DisplayVersion" "0.1.0"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture" "Publisher" "Nebulynx Game Studios"
@@ -122,37 +156,90 @@ Section "Prism Aperture Core" SecCore
 
     ; Create Start Menu shortcuts
     CreateDirectory "$SMPROGRAMS\NebulynxGames\PrismSuite\Aperture"
-    CreateShortcut "$SMPROGRAMS\NebulynxGames\PrismSuite\Aperture\Prism Aperture Server.lnk" "$INSTDIR\prism-aperture-server.exe" "" "$INSTDIR\assets\icon.ico" 0
-    CreateShortcut "$SMPROGRAMS\NebulynxGames\PrismSuite\Aperture\Uninstall Prism Aperture.lnk" "$INSTDIR\Uninstall.exe" "" "$INSTDIR\assets\installer.ico" 0
+    CreateShortcut "$SMPROGRAMS\NebulynxGames\PrismSuite\Aperture\Aperture Server.lnk" "$INSTDIR\prism-aperture-server.exe" "" "$INSTDIR\assets\icon.ico" 0
+    CreateShortcut "$SMPROGRAMS\NebulynxGames\PrismSuite\Aperture\Uninstall Aperture.lnk" "$INSTDIR\Uninstall.exe" "" "$INSTDIR\assets\installer.ico" 0
 
-    CreateDirectory "$SMPROGRAMS\Prism Aperture"
-    CreateShortcut "$SMPROGRAMS\Prism Aperture\Prism Aperture Server.lnk" "$INSTDIR\prism-aperture-server.exe" "" "$INSTDIR\assets\icon.ico" 0
-    CreateShortcut "$SMPROGRAMS\Prism Aperture\Uninstall Prism Aperture.lnk" "$INSTDIR\Uninstall.exe" "" "$INSTDIR\assets\installer.ico" 0
+    CreateDirectory "$SMPROGRAMS\Aperture"
+    CreateShortcut "$SMPROGRAMS\Aperture\Aperture Server.lnk" "$INSTDIR\prism-aperture-server.exe" "" "$INSTDIR\assets\icon.ico" 0
+    CreateShortcut "$SMPROGRAMS\Aperture\Uninstall Aperture.lnk" "$INSTDIR\Uninstall.exe" "" "$INSTDIR\assets\installer.ico" 0
+
+    CreateShortcut "$SMPROGRAMS\Aperture\Register Aperture Driver.lnk" "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" '-NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\tools\register_driver.ps1" -DriverPath "$INSTDIR\aperture_driver"'
 
     ; Create Desktop shortcut
-    CreateShortcut "$DESKTOP\Prism Aperture Server.lnk" "$INSTDIR\prism-aperture-server.exe" "" "$INSTDIR\assets\icon.ico" 0
+    CreateShortcut "$DESKTOP\Aperture Server.lnk" "$INSTDIR\prism-aperture-server.exe" "" "$INSTDIR\assets\icon.ico" 0
 SectionEnd
+
+Section "Aperture OpenXR runtime (experimental, not activated)" SecXR
+    SetOutPath "$INSTDIR\openxr"
+    File "tools\prism_vdxr\bin\prism-vdxr.dll"
+    File "tools\prism_vdxr\bin\prism-vdxr.json"
+    File "tools\prism_vdxr\bin\aperture-xr.json"
+    File "tools\prism_vdxr\bin\LICENSE-VDXR.txt"
+    SetOutPath "$INSTDIR"
+SectionEnd
+
+Section /o "Download and install VB-Audio VB-CABLE (optional)" SecCable
+    DetailPrint "Downloading verified VB-CABLE and opening the vendor installer..."
+    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\tools\install_vbcable.ps1"' $0
+    ${If} $0 != 0
+        MessageBox MB_OK|MB_ICONEXCLAMATION "VB-CABLE download, verification or setup failed (exit $0). Aperture is installed. You can retry VB-CABLE from vb-audio.com." /SD IDOK
+    ${Else}
+        MessageBox MB_OK|MB_ICONINFORMATION "VB-CABLE setup finished. Follow the vendor restart instructions. Route applications to CABLE Input, then select VB-CABLE in Aperture." /SD IDOK
+        SetRebootFlag true
+    ${EndIf}
+SectionEnd
+
+!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
+    !insertmacro MUI_DESCRIPTION_TEXT ${SecCore} "Aperture Server, Windows Service, portable FFmpeg encoder, and Aperture SteamVR driver."
+    !insertmacro MUI_DESCRIPTION_TEXT ${SecXR} "Install experimental OpenXR runtime files. The active system runtime is unchanged. Use SteamVR for OpenXR by default; do not run both compositor backends together."
+    !insertmacro MUI_DESCRIPTION_TEXT ${SecCable} "Download VB-CABLE from VB-Audio, verify its pinned SHA256 and publisher signature, and show its installer. Optional; may require restart. Donationware terms apply."
+!insertmacro MUI_FUNCTION_DESCRIPTION_END
+
+Function .onInit
+    ${IfNot} ${RunningX64}
+        MessageBox MB_OK|MB_ICONSTOP "Aperture requires 64-bit Windows." /SD IDOK
+        SetErrorLevel 1
+        Abort
+    ${EndIf}
+    SetRegView 64
+FunctionEnd
+
+Function un.onInit
+    SetRegView 64
+FunctionEnd
 
 ; ==============================================================================
 ; Uninstaller Section
 ; ==============================================================================
 
 Section "Uninstall"
-    DetailPrint "Stopping Prism Aperture processes and service..."
+    DetailPrint "Stopping Aperture processes and service..."
     ExecWait 'taskkill /F /IM prism-aperture-server.exe'
     ExecWait '"$INSTDIR\prism-aperture-service.exe" --stop'
+    ExecWait '"$INSTDIR\prism-aperture-service.exe" --restore-owned-runtime'
     ExecWait '"$INSTDIR\prism-aperture-service.exe" --uninstall'
 
     ; Remove Windows Firewall rules
-    ExecWait 'netsh advfirewall firewall delete rule name="Prism Aperture Server"'
-    ExecWait 'netsh advfirewall firewall delete rule name="Prism Aperture Server TCP"'
-    ExecWait 'netsh advfirewall firewall delete rule name="Prism Aperture Server UDP"'
+    ExecWait 'netsh advfirewall firewall delete rule name="Aperture Server"'
+    ExecWait 'netsh advfirewall firewall delete rule name="Aperture Server TCP"'
+    ExecWait 'netsh advfirewall firewall delete rule name="Aperture Server UDP"'
 
-    ; Legacy ALVR registration is not owned by this installer; leave it untouched.
+    ; Unregister only Aperture's own driver. VB-CABLE may be shared by other apps.
+    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\tools\register_driver.ps1" -DriverPath "$INSTDIR\aperture_driver" -Remove'
+    RMDir /r "$INSTDIR\aperture_driver"
+    RMDir /r "$INSTDIR\openxr"
+    Delete "$INSTDIR\tools\register_driver.ps1"
+    Delete "$INSTDIR\tools\install_vbcable.ps1"
+    RMDir "$INSTDIR\tools"
+    Delete "$INSTDIR\ffmpeg.exe"
+    RMDir /r "$INSTDIR\licenses\ffmpeg"
+    RMDir "$INSTDIR\licenses"
+    Delete "$SMPROGRAMS\Aperture\Register Aperture Driver.lnk"
 
     ; Delete files
     Delete "$INSTDIR\prism-aperture-server.exe"
     Delete "$INSTDIR\prism-aperture-service.exe"
+    Delete "$INSTDIR\Aperture-Updater.exe"
     Delete "$INSTDIR\Uninstall.exe"
     Delete "$INSTDIR\assets\icon.ico"
     Delete "$INSTDIR\assets\icon.png"
@@ -171,22 +258,30 @@ Section "Uninstall"
     RMDir "$PROGRAMFILES64\NebulynxGames"
 
     ; Delete shortcuts
-    Delete "$SMPROGRAMS\NebulynxGames\PrismSuite\Aperture\Prism Aperture Server.lnk"
-    Delete "$SMPROGRAMS\NebulynxGames\PrismSuite\Aperture\Uninstall Prism Aperture.lnk"
+    Delete "$SMPROGRAMS\NebulynxGames\PrismSuite\Aperture\Aperture Server.lnk"
+    Delete "$SMPROGRAMS\NebulynxGames\PrismSuite\Aperture\Uninstall Aperture.lnk"
     RMDir "$SMPROGRAMS\NebulynxGames\PrismSuite\Aperture"
     RMDir "$SMPROGRAMS\NebulynxGames\PrismSuite"
     RMDir "$SMPROGRAMS\NebulynxGames"
 
-    Delete "$SMPROGRAMS\Prism Aperture\Prism Aperture Server.lnk"
-    Delete "$SMPROGRAMS\Prism Aperture\Uninstall Prism Aperture.lnk"
-    RMDir "$SMPROGRAMS\Prism Aperture"
-    Delete "$DESKTOP\Prism Aperture Server.lnk"
+    Delete "$SMPROGRAMS\Aperture\Aperture Server.lnk"
+    Delete "$SMPROGRAMS\Aperture\Uninstall Aperture.lnk"
+    RMDir "$SMPROGRAMS\Aperture"
+    Delete "$DESKTOP\Aperture Server.lnk"
 
     ; Delete registry keys
     DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismAperture"
     DeleteRegKey HKLM "Software\NebulynxGames\PrismSuite\Aperture"
-    DeleteRegKey HKLM "Software\NebulynxGames\PrismSuite"
-    DeleteRegKey HKLM "Software\NebulynxGames"
+    DeleteRegKey /ifempty HKLM "Software\NebulynxGames\PrismSuite"
+    DeleteRegKey /ifempty HKLM "Software\NebulynxGames"
     DeleteRegKey HKLM "Software\Prism Aperture"
     DeleteRegKey HKLM "Software\PrismAperture"
 SectionEnd
+
+
+
+
+
+
+
+

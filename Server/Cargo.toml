@@ -6,6 +6,8 @@ description = "Prism Aperture Server — High-performance VR desktop streamer"
 license = "MIT"
 
 [dependencies]
+semver = "1"
+aperture-wire = { path = "crates/aperture-wire" }
 # Window/GUI
 eframe = { version = "0.29", features = ["persistence"] }
 egui = "0.29"
@@ -14,6 +16,7 @@ egui_extras = { version = "0.29", features = ["image"] }
 # Windows APIs
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Networking_WinHttp",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Direct3D",
@@ -21,8 +24,11 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Direct3D11on12",
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Devices_FunctionDiscovery",
     "Win32_Media_Audio_Endpoints",
     "Win32_System_Com",
+    "Win32_System_Console",
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
@@ -98,4 +104,12 @@ path = "src/service.rs"
 [[bin]]
 name = "patch-axml"
 path = "src/bin/patch_axml.rs"
+
+
+
+
+
+[[bin]]
+name = "Aperture-Updater"
+path = "src/bin/aperture_updater.rs"
 
