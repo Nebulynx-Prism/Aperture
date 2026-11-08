@@ -40,7 +40,15 @@ A new, next-generation alternative to Virtual Desktop. Available on Meta Quest, 
 
 ## Installation
 
-TBD.
+1. Download the [server](https://github.com/Nebulynx-Prism/Aperture/releases/download/v0.1.0/Aperture-Setup.exe) & the [client](https://github.com/Nebulynx-Prism/Aperture/releases/download/v0.1.0/Aperture-Quest.apk)
+2. Install the server and the client
+3. Load up and enjoy!
+
+> [!NOTE]
+> You can use Obtainium for the client on supported devices.
+
+> [!IMPORTANT]
+> To install the client, please view this [article](https://www.uploadvr.com/sideloading-quest-how-to/) on how to install 3rd party apps on Quest headsets.
 
 ## AI Notice
 
