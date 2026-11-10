@@ -50,6 +50,9 @@ A new, next-generation alternative to Virtual Desktop. Available on Meta Quest, 
 > [!IMPORTANT]
 > To install the client, please view this [article](https://www.uploadvr.com/sideloading-quest-how-to/) on how to install 3rd party apps on Quest headsets.
 
+> [!IMPORTANT]
+> To use Aperture on Windows, MSVC++ needs to be installed. This requirement will be removed in the future when a Linux version comes out. 
+
 ## AI Notice
 
 Aperture is built using Claude 4.6 Opus, GPT-6 Astra, and Gemini 3.8 Flash in Rust, thanks to the use of Google Antigravity & OpenAI Codex.
